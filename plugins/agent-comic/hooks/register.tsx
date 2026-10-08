@@ -496,11 +496,19 @@ ${formatTimings(timings, latencyMs, answered)}` }
     return ran
   })
 
-  // a tool call the person must allow: he turns to them while the prompt is up
-  on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
-    if (verdict.decision === 'ask' && !e.agentId) stage.attention = 'permission'
-    return verdict
+  // a permission dialog about to be put to the person (no hook answered it, and in auto mode
+  // the classifier did not settle it): he turns to them while it is up
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const answer = await next(e)
+    const isAnswered = (answer as { decision?: unknown } | undefined)?.decision !== undefined
+    if (!isAnswered && !(e as { agent_id?: string }).agent_id) stage.attention = 'permission'
+    return answer
+  })
+
+  // the tool is running (its progress row is up): the dialog was answered
+  on('ui.render', { component: 'ToolProgress' }, async ($, e, next) => {
+    if (stage.attention === 'permission') stage.attention = null
+    return next(e)
   })
 
   // a subagent finished, foreground or background: its small Claude walks over and reports

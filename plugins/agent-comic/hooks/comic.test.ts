@@ -936,19 +936,43 @@ test('Claude keeps a milestone in the hub with the comic tool, a couple per sess
   expect(JSON.stringify(list)).toContain('trophy: auth bug slain')
 })
 
-test('a permission prompt puts the call out on the band', async ($, on) => {
+const bandText = async ($: Engine) => {
+  const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
+  const raster = (await mounted.find({ key: 'stage' })) as unknown as { props: { cells: string; columns: number } }
+  const text = cells(raster.props.cells, raster.props.columns).map(r => r.text).join('\n')
+  await mounted.unmount()
+  return text
+}
+const permissionRequest = ($: Engine) =>
+  $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } } as unknown as Parameters<Engine['classic']['PermissionRequest']>[0])
+
+test('a permission dialog puts the call out on the band, and the tool running takes it down', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, { key: 'engine' }, 'engine') as RenderElement
   })
-  on('tool.check', async () => ({ decision: 'ask' }))
+  on('classic.PermissionRequest', async () => ({}))
   await directorSession($, on, () => sceneIn('meadow'))
-  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' } } as unknown as Parameters<Engine['tool']['check']>[0])
-  const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
-  const raster = (await mounted.find({ key: 'stage' })) as unknown as { props: { cells: string; columns: number } }
-  const text = cells(raster.props.cells, raster.props.columns).map(r => r.text).join('\n')
-  expect(text).toContain('Needs your OK')
-  await mounted.unmount()
+  await permissionRequest($)
+  expect(await bandText($)).toContain('Needs your OK')
+  // allowed: the tool runs, and its progress row comes up under it
+  const progress = await $.ui.mount({
+    plugin: 'agent-comic', surface: 'terminal', component: 'ToolProgress',
+    props: { tool_use_id: 'toolu_1', kind: 'background_hint', hint: '(ctrl+b to run in background)' },
+  })
+  await progress.unmount()
+  expect(await bandText($)).not.toContain('Needs your OK')
+})
+
+test('a permission request a hook or the auto-mode classifier settles puts no call out', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { key: 'engine' }, 'engine') as RenderElement
+  })
+  on('classic.PermissionRequest', async () => ({ decision: { behavior: 'allow' } }))
+  await directorSession($, on, () => sceneIn('meadow'))
+  await permissionRequest($)
+  expect(await bandText($)).not.toContain('Needs your OK')
 })
 
 test('at home every keepsake keeps its title up, and long neighbouring titles never run together', async () => {
