@@ -27,6 +27,12 @@ const scene = (raw: unknown): Scene => {
   if ('error' in s) throw new Error(s.error)
   return s
 }
+/** A director's scene in an existing world, so its world-changing beats (travel) are kept. */
+const directed = (raw: { setting: Scene['setting']; hat: Scene['hat']; props: Scene['props']; beats: object[] }): Scene => {
+  const s = parseScene(JSON.stringify(raw), { setting: raw.setting, props: raw.props }, { changes: 'director' })
+  if ('error' in s) throw new Error(s.error)
+  return { ...s, continues: undefined, hat: raw.hat }
+}
 
 type Clip = { kind: 'emotion' | 'action'; shows: string; scene: Scene; ms: number; columns: number }
 const clips: Record<string, Clip> = {}
@@ -120,12 +126,12 @@ const features: Record<string, Feature> = {
     setup: s => { s.setHome(KEEPSAKES); s.startHome(); (s as unknown as { nextPastime: string }).nextPastime = 'movie'; for (let t = 994_000; t < 1_000_000; t += 100) s.step(t) } },
   'hub-interrupt': { shows: 'a new turn while he watches a film: up off the couch and a sprint for the door', ms: 5000, columns: 100,
     setup: s => settle(s, 'movie'), at: [[1000, s => { s.leaveHome(); s.queue(world) }]] },
-  'world-prop': { shows: 'Claude changes a prop with the world tool: he lifts it overhead, a puff, and it is something new', ms: 9000, columns: 80,
-    setup: s => s.queue(scene({ setting: 'desert', hat: 'straw', props: [{ id: 'c', kind: 'cactus', x: 25 }, { id: 's', kind: 'scroll', x: 55, label: 'notes' }, { id: 'k', kind: 'chest', x: 82 }], beats: [{ do: 'walk', to: 35 }, { do: 'wait', secs: 8 }] })),
-    at: [[1200, s => s.changeProp('s', 'computer', 'npm test')]] },
-  'world-scenery': { shows: 'Claude moves to new scenery with the world tool: a door appears, he walks through, and steps out somewhere new', ms: 10000, columns: 80,
-    setup: s => s.queue(scene({ setting: 'desert', hat: 'straw', props: [{ id: 'c', kind: 'cactus', x: 25 }, { id: 'k', kind: 'chest', x: 82 }], beats: [{ do: 'walk', to: 35 }, { do: 'wait', secs: 8 }] })),
-    at: [[1200, s => s.changeScenery(scene({ setting: 'space', hat: 'wizard', props: [{ id: 'f', kind: 'flag', x: 45 }, { id: 'p', kind: 'computer', x: 75 }], beats: [{ do: 'emote', mood: 'happy', secs: 1.5 }, { do: 'look', at: 'f' }] }))]] },
+  'world-prop': { shows: 'the director changes a prop: he lifts it overhead, a puff, and it is something new', ms: 9000, columns: 80,
+    setup: s => s.queue(scene({ setting: 'desert', hat: 'straw', props: [{ id: 'c', kind: 'cactus', x: 25 }, { id: 's', kind: 'scroll', x: 55, label: 'notes' }, { id: 'k', kind: 'chest', x: 82 }], beats: [{ do: 'walk', to: 35 }, { do: 'transform', at: 's', into: 'computer', label: 'npm test' }, { do: 'emote', mood: 'happy', secs: 2 }] })) },
+  'world-hat': { shows: 'the director changes the hat: a puff over his head and a new one is on', ms: 6000, columns: 60,
+    setup: s => s.queue(scene({ setting: 'cave', hat: 'straw', props: [{ id: 'r', kind: 'rock', x: 70 }], beats: [{ do: 'walk', to: 40 }, { do: 'hat', hat: 'miner' }, { do: 'dig', secs: 2 }] })) },
+  'world-scenery': { shows: 'the director moves to new scenery: a door appears, he walks through, and steps out somewhere new', ms: 11000, columns: 80,
+    setup: s => s.queue(directed({ setting: 'desert', hat: 'straw', props: [{ id: 'c', kind: 'cactus', x: 25 }, { id: 'k', kind: 'chest', x: 82 }], beats: [{ do: 'walk', to: 35 }, { do: 'wait', secs: 1 }, { do: 'travel', setting: 'space', hat: 'wizard', props: [{ kind: 'flag' }, { kind: 'computer' }] }] })) },
   'needs-you': { shows: 'a permission prompt or a question: he stops, turns to you and waves', ms: 6000, columns: 70,
     setup: s => s.queue(working),
     at: [[1500, s => { s.attention = 'permission' }], [4500, s => { s.attention = null }]] },

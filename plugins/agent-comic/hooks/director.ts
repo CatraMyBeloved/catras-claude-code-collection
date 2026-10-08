@@ -11,7 +11,7 @@ Reply with ONLY a JSON object, no prose, no code fence:
 {
   "setting": one of ${SETTINGS.map(s => `"${s}"`).join(', ')},
   "mood": one of ${MOODS.map(m => `"${m}"`).join(', ')}   (Claude's mood for the whole scene),
-  "hat": one of ${HATS.map(h => `"${h}"`).join(', ')}   (first scene of the session only: Claude wears it with the world),
+  "hat": one of ${HATS.map(h => `"${h}"`).join(', ')}   (first scene of the session only; later, change it with the hat beat),
   "props": [ { "id": "short-id", "kind": one of ${PROP_KINDS.map(k => `"${k}"`).join(', ')}, "x": 0-100, "label": "optional, max 22 chars" } ],
   "beats": [ ... ]
 }
@@ -28,6 +28,10 @@ Beats run in order:
   {"do":"plant_sign","label":"max 22 chars","x":0-100,"id":"optional short id"}   (hammers a new sign into the ground: mark a finding, a file, a TODO)
   {"do":"pull_sign","at":"<sign id>"}   (pulls a sign out of the ground and it vanishes: done, fixed, or wrong after all)
   {"do":"ponder","secs":3}   (stands and contemplates: a "..." bubble, looks one way, then the other)
+  {"do":"transform","at":"<prop id>","into":"<prop kind>","label":"optional"}   (lifts it overhead, a puff of magic smoke, it becomes the new thing for good)
+  {"do":"hat","hat":"<hat>"}   (a puff over his head and he wears another hat, for good)
+  {"do":"travel","setting":"<setting>","props":[{"kind":"<prop kind>","label":"optional"}, ... up to 4],"hat":"optional"}
+      (a door appears, he walks through it into new scenery with these props; always the LAST beat of its scene)
   {"do":"dance"}  {"do":"wave"}  {"do":"shrug"}  {"do":"dig"}  {"do":"jump"}  {"do":"celebrate"}  {"do":"wait","secs":1}
 
 Guidelines:
@@ -45,26 +49,30 @@ Guidelines:
   writing or editing files: stacking crates, carrying a scroll to its sign, planting a flag.
   refactoring or moving code: carrying props from one place to another and setting them down in a new order.
   web research: a scroll from the sea, a signal from a far planet.  a long wait: night, a lamp, sitting by a mushroom, dozing.
-- One world per session. The session's FIRST scene sets it up: a setting and exactly 4 props that belong together as one small place
-  (a desert dig site: cactus, chest, rock, a sign; a night camp: lamp, crate, scroll, flag). Pick a place that can hold a whole
-  session of work. Every later scene gets that world in the request: do not send "props" then, refer to the props by their ids.
-  You never change the world: props are not destroyed or turned into other things in your scenes (the agent itself changes them
-  with a tool of its own, and the request then shows the new world). Carrying a prop to another spot is fine.
+- One world per session, and you own it. The session's FIRST scene sets it up: a setting, a hat and exactly 4 props that belong
+  together as one small place (a desert dig site: cactus, chest, rock, a sign; a night camp: lamp, crate, scroll, flag). Pick a
+  place that can hold a whole session of work. Every later scene gets the world as it now is in the request: do not send "props"
+  or "hat" then, refer to the props by their ids. Carrying a prop to another spot is fine; squashing is not (props never vanish).
+- Change the world rarely, as a beat of the story, when the WORK changes, never just for variety:
+  transform a prop when the kind of work shifts (a scroll becomes a computer as reading turns into running tests; a crate
+  becomes a chest once the bug is found); hat when the session's spirit changes (tophat for a finished feature, nightcap for
+  a long slog, miner when the digging starts); travel only when the session moves on to clearly different work, and only at a
+  turn's start or end. Most scenes change nothing. The request says how many changes are left this session; never use more.
 - Signs are notes in the world, on top of the 4 props: when something concrete is found (a cause, a number, a file, a TODO),
   plant_sign it right there with a short label (aim for 14 characters or fewer: long boards crowd the strip);
   pull_sign one that is done or turned out wrong. At most 2 planted signs stand at once; they stay until pulled.
-- A hat, chosen with the world in the session's first scene, fits its place and spirit: wizard (library, night, space, deep reading),
-  miner (cave, digging, searching), straw (beach, desert, meadow), tophat (a proud or festive session), nightcap (night, long waits),
-  or none. It stays on with the world.
+- A hat fits the place and the spirit of the work: wizard (library, night, space, deep reading),
+  miner (cave, digging, searching), straw (beach, desert, meadow), tophat (a proud or festive moment), nightcap (night, long waits),
+  or none. It stays on until a hat beat changes it.
 - A "sign" shows its label on a board: use it for file names, commands, or search terms the agent is working on (e.g. "auth.ts", "npm test").
 - Props are toys, not scenery: every scene has at least TWO interactions with its props (look at, carry and drop, type at, dig beside),
   ideally a tiny story: find something, react to it, do something about it.
-- Use "read" at most once per scene, and not in two scenes in a row. Prefer carry, drop, type, dig, squash, run and the gestures.
+- Use "read" at most once per scene, and not in two scenes in a row. Prefer carry, drop, type, dig, run and the gestures.
 - The setting is chosen once per session: its first scene picks it, every later scene stays in it.
   Vary the moods, actions and stories instead. Follow the variety notes in each request.
 - Give Claude feelings: pick a scene mood that fits the work, and use at least one emote, action or gesture (wave, shrug, dance) per scene so the strip stays lively. Vary them between scenes.
 - Speech is Claude remarking on REAL findings from the log: concrete, short, a little witty, first person. Never invent facts that are not in the log.
-- Continuity lives in the story: the place and its props stay the same all session, so new turns can call back to earlier ones.`
+- Continuity lives in the story: the place and its props carry over from turn to turn, so new turns can call back to earlier ones.`
 
 export function buildPrompt(args: {
   goal: string | null
@@ -75,6 +83,8 @@ export function buildPrompt(args: {
   interlude?: { n: number; quietSecs: number; isLast: boolean }
   variety?: Variety
   world?: { setting: string; props: readonly { id: string; kind: string; label?: string; x: number }[]; gone: readonly string[]; hat?: string }
+  /** World changes the director may still make this session. */
+  changesLeft?: { transform: number; hat: number; travel: number }
 }): string {
   const older = args.log.slice(0, Math.max(0, args.log.length - args.fresh))
   const latest = args.log.slice(Math.max(0, args.log.length - args.fresh))
@@ -87,7 +97,7 @@ export function buildPrompt(args: {
     args.previous
       ? `Previous scene: setting=${args.previous.setting}, mood=${args.previous.mood}, props=${args.previous.props.map(p => `${p.kind}${p.label ? `(${p.label})` : ''}`).join(', ') || 'none'}`
       : 'This is the first scene.',
-    args.world ? worldAsk(args.world) : 'This is the FIRST scene of the session: set up its world (setting and 4 related props). It stays for the whole session.',
+    args.world ? worldAsk(args.world, args.changesLeft) : 'This is the FIRST scene of the session: set up its world (setting, hat and 4 related props). It carries over to every later turn.',
     args.variety ? varietyAsk(args.variety, Boolean(args.interlude)) : '',
     args.finished
       ? 'The agent has just FINISHED its turn. Stage a short wrap-up scene: Claude sums up the outcome in one remark and celebrates or shrugs as fits.'
@@ -138,11 +148,13 @@ function varietyAsk(v: Variety, isInterlude: boolean): string {
   return lines.join('\n')
 }
 
-function worldAsk(w: NonNullable<Parameters<typeof buildPrompt>[0]['world']>): string {
+function worldAsk(w: NonNullable<Parameters<typeof buildPrompt>[0]['world']>, left?: { transform: number; hat: number; travel: number }): string {
   const props = w.props.map(p => `${p.id} = ${p.kind}${p.label ? ` "${p.label}"` : ''} at x=${p.x}`).join('; ')
-  return `This session's world is set (do NOT send "props" or "hat"): setting ${w.setting}; hat ${w.hat ?? 'none'}; props: ${props || 'none left'}` +
-    (w.gone.length ? `; gone: ${w.gone.join(', ')}` : '') +
-    '. Use these ids. Keep every prop as it is: no transform, no squash.'
+  const world = `The world as it is now (do NOT send "props" or "hat"): setting ${w.setting}; Claude wears: ${w.hat ?? 'none'}; props: ${props || 'none left'}` +
+    (w.gone.length ? `; gone: ${w.gone.join(', ')}` : '') + '. Use these ids.'
+  if (!left) return world
+  return `${world}
+World changes left this session (use only when the work really changes): transform ${left.transform}, hat ${left.hat}, travel ${left.travel}.`
 }
 
 /** What to stage when nothing new has happened for a while but the agent is still at work. */

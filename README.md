@@ -28,10 +28,11 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
   tool (`hub_add`, deferred, so it costs no context until used); the hub keeps six. `/comic-hub` lists them.
 - **Pet him**: the ♥ beside the band (click it in fullscreen mode, or press ctrl+x tab, then p), or `/comic-pet`: he lights up, and a headpat is sent as your message ("Here, have a headpat. You are doing amazing!"), which Claude answers.
 - **One world per session**: the session's first turn sets up a place (a setting, a hat and four props) and
-  every later turn plays in it, so the story can call back to earlier turns. The scenes never change it; only
-  Claude does, with the mod's world tool (`world_change`, deferred): he lifts a prop overhead and, with a puff,
-  it becomes something new (up to 6 per session), or he summons a door and walks through it into new scenery
-  (up to 2 per session). After a long idle he goes home, and the next turn takes him back into the same world.
+  every later turn plays in it, so the story can call back to earlier turns. The director owns it and changes it
+  rarely, as part of a scene, when the work really shifts: he lifts a prop overhead and, with a puff, it becomes
+  something new (up to 6 per session); a puff over his head brings a new hat (up to 4); or he summons a door and
+  walks through it into new scenery (up to 2). Canned scenes never change it, and nothing is ever squashed away.
+  After a long idle he goes home, and the next turn takes him back into the same world.
 - **Needs you**: when a permission prompt or a question is waiting, he stops, turns to you and waves.
 - **Progress**: the agent's task list shows as a trail along the ground, with a flag at the end.
 - **Git**: a commit plants a little flag, a push lets a balloon go.

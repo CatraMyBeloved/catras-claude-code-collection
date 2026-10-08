@@ -44,6 +44,8 @@ export type BeatAction =
   | { do: 'celebrate' }
   | { do: 'ponder'; secs?: number }
   | { do: 'wait'; secs: number }
+  | { do: 'hat'; hat: Hat }
+  | { do: 'travel'; setting: Setting; props: Prop[]; hat?: Hat }
 
 /** `continues`: plays in the current turn's world (its setting and props, as they now are). */
 export const HATS = ['none', 'wizard', 'miner', 'straw', 'tophat', 'nightcap'] as const
@@ -87,16 +89,23 @@ const secs = (v: unknown, lo: number, hi: number) => (v === undefined ? undefine
 const isMood = (v: unknown): v is Mood => MOODS.includes(v as Mood)
 
 /**
+ * Who may change the session's world in a scene played in it: `none` (canned scenes: transform,
+ * hat and travel are dropped) or `director` (it may transform a prop, swap the hat, or travel).
+ * Squashing a prop is never allowed in a world: the world keeps its props.
+ */
+export type WorldChanges = 'none' | 'director'
+
+/**
  * Pulls the first JSON object out of a reply and holds it to the language. Given the
- * session's `world`, the scene plays in it: its own setting and props are ignored.
- * `keepWorld`: the props stay what they are (only Claude's own tool changes them), so
- * transform and squash beats are dropped.
+ * session's `world`, the scene plays in it: its own setting and props are ignored, and
+ * what may change the world follows `changes`. A travel beat ends the scene.
  */
 export function parseScene(
   reply: string,
   world?: { setting: Setting; props: readonly Prop[] },
-  opts: { keepWorld?: boolean } = {},
+  opts: { changes?: WorldChanges } = {},
 ): Scene | { error: string } {
+  const mayChange = !world || opts.changes === 'director'
   const start = reply.indexOf('{')
   const end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
@@ -142,7 +151,7 @@ export function parseScene(
         break
       case 'squash':
       case 'carry':
-        if (b.do === 'squash' && opts.keepWorld) break
+        if (b.do === 'squash' && world) break
         if (ids.has(b.at)) beats.push({ do: b.do, at: b.at })
         break
       case 'plant_sign': {
@@ -160,7 +169,7 @@ export function parseScene(
         if (signs.has(b.at)) beats.push({ do: 'pull_sign', at: b.at })
         break
       case 'transform':
-        if (!opts.keepWorld && ids.has(b.at) && PROP_KINDS.includes(b.into)) {
+        if (mayChange && ids.has(b.at) && PROP_KINDS.includes(b.into)) {
           beats.push({ do: 'transform', at: b.at, into: b.into, label: str(b.label, 22) || undefined })
         }
         break
@@ -193,7 +202,22 @@ export function parseScene(
       case 'wait':
         beats.push({ do: 'wait', secs: clamp(num(b.secs, 1), 0.3, 4) })
         break
+      case 'hat':
+        if (mayChange && HATS.includes(b.hat)) beats.push({ do: 'hat', hat: b.hat })
+        break
+      case 'travel': {
+        if (!world || !mayChange || !SETTINGS.includes(b.setting) || b.setting === world.setting) break
+        const props: Prop[] = []
+        for (const p of Array.isArray(b.props) ? b.props.slice(0, MAX_PROPS) : []) {
+          if (!PROP_KINDS.includes(p?.kind)) continue
+          props.push({ id: `${p.kind}${props.length}`, kind: p.kind, x: [24, 44, 64, 84][props.length]!, label: str(p.label, 22) || undefined })
+        }
+        beats.push({ do: 'travel', setting: b.setting, props, hat: HATS.includes(b.hat) ? b.hat : undefined })
+        break
+      }
     }
+    // through the door, the scene is over: anything after it belonged to the old place
+    if (beats[beats.length - 1]?.do === 'travel') break
   }
   if (beats.length === 0) return { error: 'the scene has no usable beats' }
 

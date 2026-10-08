@@ -479,7 +479,7 @@ test('the hat comes with the world: parsed in the first scene, kept by later one
   play(stage, t, 8_000)
   expect(stage.world().hat).toBe('miner') // Sonnet cannot swap hats mid-turn
   const prompt = buildPrompt({ goal: 'x', log: ['a'], fresh: 1, previous: null, finished: false, world: stage.world() })
-  expect(prompt).toContain('hat miner')
+  expect(prompt).toContain('Claude wears: miner')
 })
 
 test('every hat draws in every pose without throwing', async () => {
@@ -774,7 +774,7 @@ test('a failed wrap-up falls back to a canned one, and the model rests a while',
 
 test('with the director off, a whole turn plays without a single model call', { options: { director: 'off' } }, async ($, on) => {
   const s = await directorSession($, on, () => sceneIn('meadow'))
-  expect(s.tools).toEqual(['hub_add', 'world_change'])
+  expect(s.tools).toEqual(['hub_add'])
   await s.turn('refactor the parser')
   await s.clock.advance(3000)
   await s.done()

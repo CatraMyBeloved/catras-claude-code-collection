@@ -182,6 +182,13 @@ export class Stage {
 
   /** Called as a queued scene begins to play. */
   onPlay: ((scene: Scene) => void) | null = null
+  /** Called once the world on stage changed: a prop transformed, a new hat, new scenery stepped into. */
+  onWorldChange: ((world: { setting: Scene['setting']; props: Prop[]; hat: Hat }) => void) | null = null
+
+  private tellWorld() {
+    const props = this.scene.props.filter(p => !this.removed.has(p.id)).map(p => ({ ...p }))
+    this.onWorldChange?.({ setting: this.scene.setting, props, hat: this.scene.hat ?? 'none' })
+  }
 
   /** The figure's column, for tools that follow it. */
   get figureColumn() {
@@ -262,6 +269,8 @@ export class Stage {
         case 'celebrate': return 1.6
         case 'dig': return b.secs ?? 2
         case 'wait': return b.secs
+        case 'hat': return 1.4
+        case 'travel': return 6
       }
     }
     const rest = (b: Beat) => restAfter(b, 0.5) * this.pace.rest
@@ -320,22 +329,8 @@ export class Stage {
   }
 
   /**
-   * Claude changes a prop of the world: he lifts it overhead, a puff, it is the new thing, he sets it down.
-   * A world still waiting to load (he is on his way in) gets the change as its first beat.
-   */
-  changeProp(id: string, into: Prop['kind'], label?: string) {
-    const beat: Beat = { do: 'transform', at: id, into, label }
-    const fresh = [...this.waiting].reverse().find(s => !s.continues)
-    if (fresh) {
-      fresh.beats = [beat, ...fresh.beats]
-      return
-    }
-    this.interject([beat, { do: 'emote', mood: 'happy', secs: 1.5 }])
-  }
-
-  /**
-   * Claude moves the world to new scenery: whatever he was doing, he stops, a door appears beside
-   * him with a puff, he walks through it and steps out into `scene` from the left.
+   * The world moves to new scenery (the director's travel beat): whatever he was doing, he stops,
+   * a door appears beside him with a puff, he walks through it and steps out into `scene` from the left.
    * At home (or already on his way through a door) the new world simply waits to load.
    */
   changeScenery(scene: Scene) {
@@ -526,6 +521,7 @@ export class Stage {
       // stepping out of a door, like coming from home: in from the left
       this.isAway = true
       this.load(this.waiting.shift()!)
+      this.tellWorld()
     }
   }
 
@@ -718,6 +714,8 @@ export class Stage {
       case 'celebrate': return t >= 1.6
       case 'dig': return t >= (b.secs ?? 2)
       case 'wait': return t >= b.secs
+      case 'hat': return t >= 1.4
+      case 'travel': return true // the door takes over: changeScenery ends the beat itself
     }
   }
 
@@ -898,10 +896,32 @@ export class Stage {
           prop.kind = b.into
           prop.label = b.label
           next(3)
+          this.tellWorld()
         } else if (run.phase === 3 && p >= 1.0) {
           this.putDown()
           next(4)
         }
+        break
+      }
+      case 'hat':
+        // a puff over his head, and he wears the new hat
+        if (run.phase === 0) {
+          const overhead = (this.spriteTop ?? this.rows * 2 - 9) - 2
+          this.give('poof', Math.round(this.x + CLAUDE_WIDTH / 2) - 1, overhead)
+          for (let k = 0; k < 3; k++) this.give('sparkle')
+          this.scene.hat = b.hat
+          this.emote = { mood: 'happy', until: this.now + 1200 }
+          run.phase = 1
+          this.tellWorld()
+        }
+        break
+      case 'travel': {
+        const props = b.props.map(p => ({ ...p }))
+        const first = props[0]
+        this.changeScenery({
+          setting: b.setting, mood: 'neutral', props, hat: b.hat ?? this.scene.hat,
+          beats: [{ do: 'emote', mood: 'happy', secs: 1.5 }, ...(first ? [{ do: 'look' as const, at: first.id }] : [])],
+        })
         break
       }
       case 'emote':
@@ -2161,7 +2181,7 @@ function restAfter(beat: Beat, jitter: number): number {
   const base: Partial<Record<Beat['do'], number>> = {
     carry: 1.6, drop: 1.6, squash: 1.6, transform: 1.8, plant_sign: 1.6, pull_sign: 1.6, look: 1.2, dig: 1.4, type: 1.4,
     say: 1.0, think: 1.0, emote: 0.8, walk: 0.6, run: 0.8,
-    ponder: 0.4, wait: 0.3,
+    ponder: 0.4, wait: 0.3, hat: 1.0,
   }
   return ((base[beat.do] ?? 1.0) + jitter * 0.6) * 1000
 }

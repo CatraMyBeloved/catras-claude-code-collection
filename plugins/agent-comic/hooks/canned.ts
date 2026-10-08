@@ -342,7 +342,7 @@ export function cannedWrap(world: World, lastSaid: string | undefined, aborted: 
 /** Holds a raw scene to the language; on any trouble a minimal valid scene plays instead. */
 function build(raw: Raw, world: World | undefined): Scene {
   try {
-    const scene = parseScene(JSON.stringify(raw), world, { keepWorld: world !== undefined })
+    const scene = parseScene(JSON.stringify(raw), world, { changes: 'none' })
     if (!('error' in scene)) return scene
   } catch { /* fall through to the fallback */ }
   const minimal = { setting: world?.setting ?? 'meadow', props: [], beats: [{ do: 'ponder', secs: 2 }] }
