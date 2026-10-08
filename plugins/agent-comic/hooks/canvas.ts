@@ -5,7 +5,6 @@ export const DEFAULT = 0x01000000
 
 const UPPER = 0x2580
 const LOWER = 0x2584
-const FULL = 0x2588
 
 export class Canvas {
   readonly px: Uint32Array
@@ -100,7 +99,9 @@ export class Canvas {
         if (top === DEFAULT && bottom === DEFAULT) {
           out[o] = 0x20; out[o + 1] = DEFAULT; out[o + 2] = DEFAULT
         } else if (top === bottom) {
-          out[o] = FULL; out[o + 1] = top; out[o + 2] = DEFAULT
+          // a solid cell is a coloured space, not a full block: no glyph for a terminal's
+          // minimum-contrast setting (VS Code's is on by default) to brighten against its own colour
+          out[o] = 0x20; out[o + 1] = top; out[o + 2] = top
         } else if (top === DEFAULT) {
           out[o] = LOWER; out[o + 1] = bottom; out[o + 2] = DEFAULT
         } else {
