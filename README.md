@@ -7,6 +7,7 @@ A Claude Code plugin marketplace with my mods and plugins.
 ```
 /plugin marketplace add CatraMyBeloved/catras-claude-code-collection
 /plugin install agent-comic@catras-claude-code-collection
+/plugin install cache-keepalive@catras-claude-code-collection
 ```
 
 The repo is private, so git must be authenticated (e.g. `gh auth login`). If the SSH attempt fails,
@@ -37,11 +38,39 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
 
 Commands: `/comic` (on/off), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
 
+### [cache-keepalive](plugins/cache-keepalive)
+
+Keeps Claude Code's prompt cache warm while you think, so the next prompt reads the conversation from the
+cache instead of paying to write it again.
+
+- **Countdown**: the prompt footer shows how long the cache stays warm, e.g. `cache ▰▰▰▰▰▰▱▱ 41:12 (1h)`,
+  in calm tones: sage green, sand yellow for the last 10 minutes, dusty rose for the last 3 (a 5-minute
+  cache keeps the same proportions). The timer restarts with every request of the main conversation.
+- **Keep-alive**: shortly before the cache expires (20s by default), and only while Claude is idle, it sends
+  one message asking Claude for a minimal acknowledgement. That request re-reads the cache and restarts its
+  lifetime. After 90 minutes without a prompt from you it lets the cache lapse.
+- **Lifetime**: `auto` follows Claude Code's own rules: `FORCE_PROMPT_CACHING_5M`, then
+  `CLAUDE_CODE_PROMPT_CACHE_TTL`, the `promptCacheTtl` setting and `ENABLE_PROMPT_CACHING_1H`; otherwise
+  1 hour on a subscription within plan limits and 5 minutes on an API key, a cloud provider or usage credits.
+  The mod cannot always tell when a subscription draws on credits; set the lifetime to `5m` in `/config` then.
+- **Gauge**: `/keepalive` opens a pane with the bar, the expiry time, the cached prefix size, a timeline of
+  hits, misses and keep-alives, and buttons to ping now (p) or pause (k).
+
+Commands: `/keepalive` (gauge), `/keepalive status`, `/keepalive on|off`, `/keepalive now`.
+Set the mode (`prompt` or `off`), lifetime, lead and idle cutoff with `/config`.
+
+Why a message and not an invisible side request: a side request (`$.model.fork`) re-sends the conversation,
+but Claude Code caches it as a separate entry, so it never kept the main conversation's cache warm in testing.
+
 ## Development
 
 ```
 claude plugin validate .
+claude plugin test plugins/cache-keepalive
 ```
+
+`CACHE_KEEPALIVE_HEADLESS=1` lets cache-keepalive run under `claude -p --plugin-dir plugins/cache-keepalive`,
+for checking its cache behaviour without an interactive session.
 
 ## License
 

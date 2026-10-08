@@ -15,6 +15,17 @@
         "ui",
         "fun"
       ]
+    },
+    {
+      "name": "cache-keepalive",
+      "source": "./plugins/cache-keepalive",
+      "description": "A calm countdown of the prompt cache in the prompt footer, and a minimal keep-alive message just before it expires",
+      "category": "mods",
+      "tags": [
+        "mod",
+        "ui",
+        "cache"
+      ]
     }
   ]
 }
