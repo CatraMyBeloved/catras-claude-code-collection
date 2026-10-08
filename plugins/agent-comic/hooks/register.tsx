@@ -36,7 +36,10 @@ let lastActivity = 0
 let isTurnRunning = false
 let interludes = 0 // asked for since the last new activity
 let lastAsk = 0
-let isAsking = false
+let epoch = 0 // bumped by each new turn: an answer asked for an older one is dropped
+let askingIn: number | null = null // the epoch of the ask under way, if any
+let failures = 0 // asks in a row that brought no scene
+let retryAfter = 0 // after a failure the director backs off until then
 let isWrapPending = false
 let previous: Scene | null = null
 let recent: Scene[] = [] // the last scenes Sonnet staged, for its variety notes
@@ -84,7 +87,9 @@ function tellRunning() {
 
 async function direct($: EngineInterface) {
   tellRunning()
-  if (isAsking || Date.now() < directorPausedUntil || !(await read($, enabled))) return
+  const now = Date.now()
+  if (askingIn === epoch || now < directorPausedUntil || now < retryAfter) return
+  if (!(await read($, enabled)) || askingIn === epoch) return
   const remainingMs = stage.remainingMs
   const untilFreeMs = stage.untilFreeMs
   const ask = nextAsk({
@@ -96,7 +101,8 @@ async function direct($: EngineInterface) {
   const isInterlude = ask === 'interlude'
   if (isInterlude) interludes++
   isWrapPending = false
-  isAsking = true
+  const mine = epoch
+  askingIn = mine
   stage.pondering = true
   lastAsk = Date.now()
   const interlude = isInterlude
@@ -111,25 +117,22 @@ async function direct($: EngineInterface) {
   const activity = isInterlude ? undefined : firstFreshAt
   const kind = finished ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
   const expectedLeftMs = isInterlude ? remainingMs : untilFreeMs
+  // the lines go out as staged; if no scene comes of them they are news again
+  const unstaged = { fresh, firstFreshAt }
   fresh = 0
   firstFreshAt = undefined
+  let isStaged = false
   try {
     const asked = Date.now()
-    const r = await $.model.complete({ model: settings.model, system: SYSTEM, prompt, maxTokens: 1500, effort: 'low', timeoutMs: 45000 })
+    const r = await $.model.complete({ model: settings.model, system: [{ text: SYSTEM, cache: true }], prompt, maxTokens: 1500, effort: 'low', timeoutMs: 45000 })
     const answeredAt = Date.now()
-    await countUsage($, r.usage)
+    countUsage($, r.usage).catch(() => undefined) // bookkeeping: the scene does not wait on the store
     if (r.isAnswered) latencyMs = blendLatency(latencyMs, answeredAt - asked)
-    if (!r.isAnswered) {
-      if (!hasLoggedError) $.ui.log(`agent-comic: no scene (${r.reason})`)
-      hasLoggedError = true
-      return
-    }
+    // a new turn began while Sonnet worked: this scene belongs to the old one
+    if (mine !== epoch) return
+    if (!r.isAnswered) return logOnce($, `no scene (${r.reason})`)
     const scene = parseScene(r.text, world)
-    if ('error' in scene) {
-      if (!hasLoggedError) $.ui.log(`agent-comic: unusable scene (${scene.error})`)
-      hasLoggedError = true
-      return
-    }
+    if ('error' in scene) return logOnce($, `unusable scene (${scene.error})`)
     // the world changes between turns, not within one: later scenes keep the first scene's setting
     if (turnSetting) scene.setting = turnSetting
     else {
@@ -142,10 +145,35 @@ async function direct($: EngineInterface) {
     scene.isNews = !isInterlude
     answered++
     stage.queue(scene)
+    isStaged = true
+    failures = 0
+    hasLoggedError = false
+  } catch (err) {
+    logOnce($, `director failed (${err instanceof Error ? err.message : String(err)})`)
   } finally {
-    isAsking = false
-    stage.pondering = false
+    if (askingIn === mine) {
+      askingIn = null
+      stage.pondering = false
+    }
+    if (!isStaged && mine === epoch) {
+      fresh += unstaged.fresh
+      if (unstaged.firstFreshAt !== undefined) firstFreshAt = Math.min(firstFreshAt ?? Infinity, unstaged.firstFreshAt)
+      if (finished) isWrapPending = true
+      failures++
+      retryAfter = Date.now() + Math.min(60_000, 1_000 * 2 ** failures) // 2s, 4s, 8s ... a minute
+    }
   }
+}
+
+/** Asks now rather than at the next tick: a new turn, or its end, should not wait a second. */
+function askSoon($: EngineInterface) {
+  $.clock.after(0, () => direct($).catch(() => undefined))
+}
+
+/** One line per run of failures: the next scene that lands lets the next failure be told. */
+function logOnce($: EngineInterface, why: string) {
+  if (!hasLoggedError) $.ui.log(`agent-comic: ${why}`)
+  hasLoggedError = true
 }
 
 /** Adds a call's tokens to this session's tally and to today's, which is kept across sessions. */
@@ -200,7 +228,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'comic-feel', description: `Make Claude act out a mood: ${FEELINGS.join(', ')}` })
 
     $.clock.every(FRAME_MS, () => drawFrame($))
-    $.clock.every(1000, () => void direct($))
+    $.clock.every(1000, () => direct($).catch(() => undefined))
 
     return next(e)
   })
@@ -235,6 +263,14 @@ ${formatTimings(timings, latencyMs, answered)}` }
   })
 
   on('prompt.submit', async ($, e, next) => {
+    linger?.cancel()
+    // typed over the running turn, or delivered into it: the same story goes on
+    if (e.turnId !== undefined) {
+      note(`the person added: ${e.text.slice(0, 300)}`)
+      return next(e)
+    }
+    epoch++
+    retryAfter = 0
     goal = e.text.slice(0, 300)
     log = []
     fresh = 0
@@ -242,8 +278,10 @@ ${formatTimings(timings, latencyMs, answered)}` }
     isWrapPending = false
     isTurnRunning = true
     turnSetting = null
-    linger?.cancel()
     note(`the person asked: ${goal}`)
+    // something to see at once while Sonnet sets up the world: idle (or asleep), Claude stops to think
+    if (stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
+    askSoon($)
     return next(e)
   })
 
@@ -302,8 +340,19 @@ ${formatTimings(timings, latencyMs, answered)}` }
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    isWrapPending = true
+    // a subagent's turn ends inside the main one: its small Claude reports through SubagentStop
+    if (e.agentId) return done
     isTurnRunning = false
+    if (e.reason === 'aborted') {
+      // stopped by the person: no celebration, and what was asked for the stopped work is dropped
+      epoch++
+      fresh = 0
+      firstFreshAt = undefined
+      isWrapPending = false
+    } else {
+      isWrapPending = true
+      askSoon($)
+    }
     await update($, lingering, () => true)
     linger?.cancel()
     linger = $.clock.after(LINGER_MS, () => endLinger($))

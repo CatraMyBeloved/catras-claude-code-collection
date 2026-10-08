@@ -1,6 +1,8 @@
 // The scene language Sonnet writes: a setting, a mood, props on the ground, and
 // beats the Claude figure performs one after another.
 
+import { cellText } from './canvas'
+
 export const SETTINGS = ['meadow', 'forest', 'cave', 'night', 'desert', 'library', 'space', 'beach'] as const
 export type Setting = (typeof SETTINGS)[number]
 
@@ -71,7 +73,7 @@ const MAX_PROPS = 4
 const MAX_BEATS = 9 // the strip stays calm: anything past this is dropped
 export const MAX_SPEECH = 110
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
-const str = (v: unknown, max: number) => (typeof v === 'string' ? clip(v.trim().replace(/\s+/g, ' '), max) : '')
+const str = (v: unknown, max: number) => (typeof v === 'string' ? clip(cellText(v), max) : '')
 
 /** Cuts at a word boundary and marks the cut, so a remark never ends mid-word. */
 export function clip(text: string, max: number): string {

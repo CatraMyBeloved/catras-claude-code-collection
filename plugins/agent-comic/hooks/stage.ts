@@ -1,6 +1,6 @@
 // The animation: plays a scene's beats with the Claude figure and draws each frame.
 
-import { Canvas } from './canvas'
+import { Canvas, cellText } from './canvas'
 import type { Beat, Hat, Mood, Prop, Scene } from './scene'
 import { BALLOON, BITS, HATS_ART, MINI_HEIGHT, MINI_WIDTH, miniClaude, CLAUDE_HEIGHT, MOOD_ICONS, CLAUDE_WIDTH, FLAG_WAVE, LOOKS, ORANGE, P, PROPS, SKY_ART, TINTS, bookColor, claude } from './sprites'
 import type { Arm, Face, Look, Tint } from './sprites'
@@ -705,7 +705,7 @@ export class Stage {
     if (this.helpers.length >= MAX_HELPERS || this.helpers.some(h => h.id === id)) return
     const fromRight = this.x < this.columns / 2
     this.helpers.push({
-      id, label, isBackground,
+      id, label: cellText(label), isBackground,
       x: fromRight ? this.columns : -MINI_WIDTH,
       facing: fromRight ? -1 : 1,
       target: this.helperSpot(),
@@ -833,7 +833,8 @@ export class Stage {
       // its task, for the first few seconds on stage
       if (h.label && now - h.born < 4000) {
         // alternate rows so two arriving helpers' labels do not run into each other; skip one that still would
-        const text = h.label.length > 16 ? h.label.slice(0, 15) + '…' : h.label
+        const chars = [...h.label]
+        const text = chars.length > 16 ? chars.slice(0, 15).join('') + '…' : h.label
         const row = Math.max(0, Math.floor(top / 2) - 1 - (index % 2))
         const l = clamp(left + 3 - Math.floor(text.length / 2), 0, Math.max(0, this.columns - text.length))
         const r = l + text.length
@@ -1124,7 +1125,7 @@ export class Stage {
       const board = { left: col, top: boxTop, width, height: 3 }
       if (grow >= 0.5 && !(this.bubbleArea && overlap(board, this.bubbleArea))) {
         const typed = [...label].slice(0, Math.ceil(((grow - 0.5) / 0.5) * [...label].length)).join('')
-        c.box(col, boxTop, [typed.padEnd([...label].length)], SIGN.fg, SIGN.bg, SIGN.border)
+        c.box(col, boxTop, [typed + ' '.repeat([...label].length - [...typed].length)], SIGN.fg, SIGN.bg, SIGN.border)
       }
       return
     }
@@ -1450,10 +1451,12 @@ function restAfter(beat: Beat, jitter: number): number {
 export function wrap(text: string, width: number): string[] {
   const lines: string[] = []
   let line = ''
+  // lengths in code points: one to a cell
+  const len = (s: string) => [...s].length
   for (const word of text.split(/\s+/).filter(Boolean)) {
-    const w = word.length > width ? word.slice(0, width - 1) + '…' : word
+    const w = len(word) > width ? [...word].slice(0, width - 1).join('') + '…' : word
     if (!line) line = w
-    else if (line.length + 1 + w.length <= width) line += ' ' + w
+    else if (len(line) + 1 + len(w) <= width) line += ' ' + w
     else {
       lines.push(line)
       line = w

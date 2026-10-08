@@ -1,7 +1,8 @@
-import { expect, test } from 'claude-code/testing'
-import type { RenderElement, RenderPropsOf } from 'claude-code'
+import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import type { ModelCompleteResult, On, RenderElement, RenderPropsOf } from 'claude-code'
 
-import { Canvas } from './canvas'
+import { Canvas, cellText } from './canvas'
 import { buildPrompt, describeCall, varietyNotes } from './director'
 import { addTiming, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { AskState } from './pacing'
@@ -650,4 +651,125 @@ test('news never cuts in while Claude has something in his hands', async () => {
   }
   // it waited for the drop (beat 7), then cut in before the scene's last two beats
   expect(cuts).toEqual([{ isHolding: false, beatsPlayed: 7 }])
+})
+
+test('text the host would refuse never reaches the canvas: emoji, marks and invisible characters', async () => {
+  expect(cellText('✅ tests pass ⚡ café​ ❤️')).toBe('tests pass café')
+  const c = new Canvas(30, 2)
+  c.text(0, 0, '✅⚡é​️⭐ok', 0xffffff)
+  const drawn = [...c.glyph.slice(0, 9)]
+  expect(drawn).toEqual([0x3f, 0x3f, 0x65, 0x3f, 0x3f, 0x3f, 0x3f, 0x6f, 0x6b])
+  const scene = parseScene(JSON.stringify({ setting: 'meadow', props: [], beats: [{ do: 'say', text: '✅ All 43 tests pass 🎉' }] }))
+  if ('error' in scene) throw new Error(scene.error)
+  expect(scene.beats[0]).toMatchObject({ do: 'say', text: 'All 43 tests pass' })
+})
+
+test('a box keeps its border tight whatever the width of its lines, and an empty one draws nothing', async () => {
+  const c = new Canvas(12, 4)
+  c.box(0, 0, ['\u{1F600}', 'ab'], 1, 2, 3)
+  // row 1: │ ? space space │ — no hole between the borders
+  const row = [...c.glyph.slice(12, 12 + 6)]
+  expect(row.every(g => g !== 0)).toBe(true)
+  expect(row[5]).toBe('│'.codePointAt(0)!)
+  expect(() => new Canvas(12, 4).box(0, 0, [], 1, 2, 3)).not.toThrow()
+})
+
+// ---- the director loop, driven through the hooks with Sonnet stood in for ----
+
+const USAGE = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+const sceneIn = (setting: string) => ({ isAnswered: true, text: JSON.stringify({ setting, props: [], beats: [{ do: 'wait', secs: 1 }] }), usage: USAGE }) as ModelCompleteResult
+
+/** A session with the engine stood in for; `answer` plays Sonnet, one call at a time, in order. */
+async function directorSession($: Engine, on: On, answer: (prompt: string, n: number) => ModelCompleteResult | Promise<ModelCompleteResult>) {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  const asks: string[] = []
+  const systems: (readonly { text: string; cache?: boolean }[] | undefined)[] = []
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('prompt.submit', async (_$, e) => ({ text: e.text }))
+  on('turn.complete', async (_$, e) => ({ text: e.answer }))
+  on('model.complete', async (_$, e) => {
+    asks.push(String(e.prompt))
+    systems.push(e.systemBlocks)
+    return { value: await answer(String(e.prompt), asks.length) }
+  })
+  on('ui.log', async () => ({ value: undefined }))
+  await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
+  const turn = (text: string, extra: object = {}) => $.prompt.submit({ text, ...extra } as Parameters<Engine['prompt']['submit']>[0])
+  const done = (extra: object = {}) =>
+    $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer', ...extra } as Parameters<Engine['turn']['complete']>[0])
+  return { clock, asks, systems, turn, done }
+}
+
+test('an answer for an old turn never sets up the new one, and does not hold it up', async ($, on) => {
+  let release: (r: ModelCompleteResult) => void = () => undefined
+  const s = await directorSession($, on, (_p, n) => (n === 1 ? new Promise(r => { release = r }) : sceneIn('beach')))
+  await s.turn('first job')
+  await s.clock.advance(1000)
+  expect(s.asks.length).toBe(1) // the first turn's world, still on its way
+  await s.turn('second job')
+  await s.clock.advance(1000)
+  expect(s.asks.length).toBe(2) // the new turn asks at once, not after the old answer
+  expect(s.asks[1]).toContain('second job')
+  release(sceneIn('cave')) // the old answer lands late
+  await s.clock.advance(1000)
+  await s.done()
+  await s.clock.advance(1000)
+  const wrap = s.asks[s.asks.length - 1]!
+  expect(wrap).toContain('setting beach')
+  expect(wrap).not.toContain('setting cave')
+})
+
+test('a subagent finishing is no wrap-up, and a turn stopped with Esc gets none either', async ($, on) => {
+  const s = await directorSession($, on, () => sceneIn('forest'))
+  await s.turn('look into it')
+  await s.clock.advance(1000)
+  expect(s.asks.length).toBe(1)
+  await s.done({ agentId: 'helper-1' })
+  await s.clock.advance(2000)
+  expect(s.asks.length).toBe(1)
+  await s.done({ reason: 'aborted', isAborted: true })
+  await s.clock.advance(2000)
+  expect(s.asks.length).toBe(1)
+})
+
+test('a prompt typed over the running turn carries the story on in the same world', async ($, on) => {
+  const s = await directorSession($, on, () => sceneIn('library'))
+  await s.turn('write the docs')
+  await s.clock.advance(1000)
+  await s.turn('also the changelog', { turnId: 't' })
+  await s.done()
+  await s.clock.advance(1000)
+  const wrap = s.asks[s.asks.length - 1]!
+  expect(wrap).toContain('setting library') // the world was not reset
+  expect(wrap).toContain('the person added: also the changelog')
+  expect(wrap).toContain('write the docs') // the goal stays the first prompt's
+})
+
+test('a failed wrap-up is asked again after a short back-off', async ($, on) => {
+  const s = await directorSession($, on, (_p, n) =>
+    n === 2 ? ({ isAnswered: false, reason: 'timeout' } as unknown as ModelCompleteResult) : sceneIn('night'))
+  await s.turn('ship it')
+  await s.clock.advance(1000)
+  await s.done()
+  await s.clock.advance(1000)
+  expect(s.asks.length).toBe(2) // the wrap, which fails
+  const until = Date.now() + 2100 // the back-off runs on wall time
+  while (Date.now() < until) { /* wait it out */ }
+  await s.clock.advance(1000)
+  expect(s.asks.length).toBe(3)
+  expect(s.asks[2]).toContain('FINISHED')
+})
+
+test('a new turn and its end are asked about at once, with the fixed instructions cached', async ($, on) => {
+  const s = await directorSession($, on, () => sceneIn('desert'))
+  await s.turn('tidy up')
+  await s.clock.settle() // no tick of the clock: the ask is not left for the next second
+  expect(s.asks.length).toBe(1)
+  expect(s.systems[0]?.[0]?.cache).toBe(true)
+  await s.done()
+  await s.clock.settle()
+  expect(s.asks.length).toBe(2)
+  expect(s.asks[1]).toContain('FINISHED')
 })

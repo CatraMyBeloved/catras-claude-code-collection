@@ -70,11 +70,12 @@ export class Canvas {
 
   /** A rounded box around `lines`, top-left at (col, row). */
   box(col: number, row: number, lines: readonly string[], fg: number, bg: number, border: number) {
+    if (!lines.length) return
     const inner = Math.max(...lines.map(l => [...l].length))
     this.text(col, row, '╭' + '─'.repeat(inner + 2) + '╮', border, bg)
     lines.forEach((l, i) => {
       this.text(col, row + 1 + i, '│', border, bg)
-      this.text(col + 1, row + 1 + i, ' ' + l.padEnd(inner) + ' ', fg, bg)
+      this.text(col + 1, row + 1 + i, ' ' + l + ' '.repeat(inner - [...l].length + 1), fg, bg)
       this.text(col + inner + 3, row + 1 + i, '│', border, bg)
     })
     this.text(col, row + lines.length + 1, '╰' + '─'.repeat(inner + 2) + '╯', border, bg)
@@ -118,7 +119,23 @@ function safe(ch: string): number {
   if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
       (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) ||
       (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0xd800 && cp <= 0xdfff)) return 0x3f
+  // emoji (✅ ⚡ ⭐) draw two cells wide, marks and format characters none: the host refuses both
+  if (UNFIT.test(ch)) return 0x3f
   return cp
+}
+
+const UNFIT = /[\p{Emoji_Presentation}\p{Mn}\p{Me}\p{Cf}]/u
+
+/**
+ * Text as the canvas can draw it, one code point to a cell: accents composed onto
+ * their letters, emoji and invisible marks dropped (anything else unfit becomes '?').
+ */
+export function cellText(s: string): string {
+  return s
+    .normalize('NFC')
+    .replace(/\p{Emoji_Presentation}|\p{Extended_Pictographic}️|[\p{Mn}\p{Me}\p{Cf}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
