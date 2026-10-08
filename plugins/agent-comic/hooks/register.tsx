@@ -620,15 +620,16 @@ ${formatTimings(timings, latencyMs, answered)}` }
       return next(e)
     }
 
-    // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own)
-    const columns = Math.max(20, Math.min(512, e.props.bodyColumns - 2))
+    // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own). A click
+    // reaches it in the fullscreen terminal; anywhere, ctrl+x tab focuses the band and p presses it
+    const columns = Math.max(20, Math.min(512, e.props.bodyColumns - 5))
     mount = { requestId: e.requestId, columns, rows }
     const { Box, Button, Raster } = $.ui.resolve(e)
     return (
       <Box flexDirection="row">
         <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
         <Box flexDirection="column" paddingLeft={1}>
-          <Button key={PET_KEY} plain onPress={() => undefined}>♥</Button>
+          <Button key={PET_KEY} plain hotkey="p" onPress={() => undefined}>♥</Button>
         </Box>
       </Box>
     )
