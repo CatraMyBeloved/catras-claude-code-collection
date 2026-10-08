@@ -1,0 +1,16 @@
+{
+  "name": "catras-claude-code-collection",
+  "description": "Catra's collection of Claude Code mods and plugins",
+  "owner": {
+    "name": "Stein"
+  },
+  "plugins": [
+    {
+      "name": "agent-comic",
+      "source": "./plugins/agent-comic",
+      "description": "A little comic above the prompt: Sonnet turns what the main agent is doing into animated pixel scenes",
+      "category": "mods",
+      "tags": ["mod", "ui", "fun"]
+    }
+  ]
+}

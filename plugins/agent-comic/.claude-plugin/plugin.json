@@ -1,0 +1,38 @@
+{
+  "name": "agent-comic",
+  "version": "0.1.0",
+  "description": "A little comic above the prompt: Sonnet turns what the main agent is doing into animated pixel scenes",
+  "author": {
+    "name": "Stein"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Director model",
+      "description": "Which model stages the scenes: sonnet (richer) or haiku (cheaper).",
+      "default": "sonnet",
+      "options": [
+        "sonnet",
+        "haiku"
+      ]
+    },
+    "pace": {
+      "type": "string",
+      "title": "Pace",
+      "description": "How busy Claude is: calm (long pauses), normal, or lively (quick and frequent scenes).",
+      "default": "calm",
+      "options": [
+        "calm",
+        "normal",
+        "lively"
+      ]
+    },
+    "showWhenIdle": {
+      "type": "boolean",
+      "title": "Show when idle",
+      "description": "Keep the comic up between turns (Claude idles and dozes off). Off: only while Claude works.",
+      "default": true
+    }
+  }
+}
