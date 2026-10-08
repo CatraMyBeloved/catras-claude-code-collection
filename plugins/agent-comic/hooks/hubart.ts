@@ -95,3 +95,109 @@ export const RAIN_CLOUD: Art = {
 
 /** The colour of a rain drop streak. */
 export const RAIN = P.sky
+
+// ---- the garden and the den ----
+
+/** A flower in 3 growth stages (sprout, bud, bloom), each 5 wide and at most 7 tall, standing on its last row. Petal pixels use the letter 'b' (bloom colour, swapped per flower) and 'B' (its shade); stem/leaves fixed greens. */
+export const FLOWER_STAGES: readonly (readonly string[])[] = [
+  ['.l.l.', '.lgl.', '..g..', '..g..'],
+  ['..b..', '.bbB.', '.lgl.', '..g..', '..g..'],
+  ['.bbb.', 'bbybB', '.bBB.', '..g..', '.lg..', '..gd.', '..g..'],
+]
+export function flowerPalette(petal: number, shade: number): Record<string, number> {
+  return { b: petal, B: shade, y: P.amber, l: P.leaf, g: P.moss, d: P.pine }
+}
+/** Petal colour pairs [base, shade] to vary flowers: red, pink, yellow, sky-blue, white. */
+export const FLOWER_COLORS: readonly (readonly [number, number])[] = [
+  [P.red, P.blood], [0xf59ac0, 0xc2588f], [P.yellow, 0xe0a030], [0x4fb8ee, P.sky], [P.white, P.silver],
+]
+
+/** A watering can held at the hand, facing right (mirrored when he faces left). */
+export const WATERING_CAN: Art = {
+  rows: ['hh..s', 'hMMMs', 'hMMd.', '.ddd.'],
+  palette: { h: P.silver, M: P.mist, d: P.steel, s: P.silver },
+}
+
+const COUCH = { t: 0x5a93a0, T: 0x3f7080, d: 0x2c4c5a, k: P.ink }
+/** The couch behind Claude: backrest and armrests. 17 wide, 6 tall. */
+export const COUCH_BACK: Art = {
+  rows: [
+    '..ttttttttttttt..',
+    '..TTTTTTTTTTTTd..',
+    'ttTTTTTTTTTTTTdTd',
+    'TTTTTTTTTTTTTTdTd',
+    'TTTTTTTTTTTTTTdTd',
+    'ddddddddddddddddd',
+  ],
+  palette: COUCH,
+}
+/** The couch in front of Claude: the seat cushion front. 17 wide, 3 tall. */
+export const COUCH_FRONT: Art = {
+  rows: [
+    'TTtttttttttttttTd',
+    'TTTTTTTTTTTTTTdTd',
+    'kdddddddddddddddk',
+  ],
+  palette: COUCH,
+}
+
+/** A TV on a low stand, 11 wide and 9 tall. The screen is drawn dark; TV_SCREEN is its inner rectangle. */
+export const TV: Art = {
+  rows: [
+    'ggggggggggg',
+    'fzzzzzzzzzF',
+    'fzzzzzzzzzF',
+    'fzzzzzzzzzF',
+    'fzzzzzzzzzF',
+    'fFFFFFFFFFF',
+    '.ttttttttt.',
+    '.WWWWWWWWb.',
+    '.bb.....bb.',
+  ],
+  palette: { g: P.steel, f: P.slate, F: P.night, z: P.ink, t: P.tan, W: P.wood, b: P.bark },
+}
+export const TV_SCREEN = { x: 1, y: 1, w: 9, h: 4 }
+
+/** A bed, 17 wide and 5 tall: pillow on the left, blanket on the right. */
+export const BED: Art = {
+  rows: [
+    'tW...............',
+    'tWhppP.uuuuuuu...',
+    'tWpppPuUUUUUUUUtW',
+    'WWWWWWWWWWWWWWWWb',
+    'bb.............bb',
+  ],
+  palette: { t: P.tan, W: P.wood, b: P.bark, h: P.white, p: 0xeae4f0, P: P.silver, u: 0x7cc0e8, U: 0x4a8fc4 },
+}
+/** Where a lying Claude's head goes (the pillow's first column). */
+export const BED_HEAD_X = 2
+/** The blanket alone, same size as BED: draw it over a lying Claude so he looks tucked in. */
+export const BED_OVER: Art = {
+  rows: [
+    '.................',
+    '.......uuuuuuu...',
+    '......uUUUUUUUU..',
+    '.................',
+    '.................',
+  ],
+  palette: BED.palette,
+}
+
+/** Claude lying on his back, head on the left: 12 wide, 3 tall, same palette keys as the figure. */
+export function claudeLying(eyes: 'open' | 'shut'): string[] {
+  const e = eyes === 'open' ? 'E' : 's'
+  return ['hhhhhhhhhhhs', `hO${e}O${e}OOOOOOs`, 'ssssssssssss']
+}
+
+/** The den: indoors, a wooden floor, a dim back wall of shelves in warm browns, a few dust motes. */
+export const DEN_LOOK: Look = {
+  grass: 0x8a5a3c, grassHi: 0xa87450, dirt: 0x5a3a2e, dirtDark: P.wine, tufts: false,
+  far: { kind: 'shelves', color: 0x3a2a30, accent: 0x54382f },
+  sky: 'none', mote: { color: 0xc9a97a, motion: 'drift', count: 3 },
+}
+/** The garden: outdoors under a sun, teal pines far away, drifting pollen. */
+export const GARDEN_LOOK: Look = {
+  grass: 0x4f9a45, grassHi: 0x8fd35a, dirt: 0x7a4a36, dirtDark: P.wine, tufts: true,
+  far: { kind: 'pines', color: 0x2f6b5a, accent: 0x3f8168 },
+  sky: 'sun', mote: { color: 0xfbd5a0, motion: 'drift', count: 4 },
+}

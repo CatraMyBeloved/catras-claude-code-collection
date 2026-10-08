@@ -8,6 +8,8 @@ import { addTiming, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { AskState } from './pacing'
 import { clip, parseScene } from './scene'
 import { Stage, wrap } from './stage'
+import { addHubItem } from './hub'
+import type { HubItem } from './hub'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
 
 const band = (isWorking: boolean) =>
@@ -1015,4 +1017,66 @@ test('a new turn has him sprint for the door, awake or woken from a nap', async 
   const woken = leaveFrom(true)
   expect(awake).toBeLessThan(4500)
   expect(woken).toBeLessThan(awake + 1000) // the start up costs well under a second
+})
+
+test('a pat on the heart beside the band: he lights up, and a kind word lands in the chat', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { key: 'engine' }, 'engine') as RenderElement
+  })
+  const session = mock.session(on)
+  await directorSession($, on, () => sceneIn('meadow'))
+  const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
+  expect(await mounted.find({ key: 'pet' })).toBeDefined()
+  await mounted.press({ key: 'pet' })
+  await mounted.unmount()
+  const notes = session.appended().filter(r => r.message.type === 'system')
+  expect(notes.length).toBe(1)
+  expect(JSON.stringify(notes[0]!.message.content)).toContain('♥')
+})
+
+test('the hub keeps six keepsakes: a seventh retires the oldest', async () => {
+  let items: HubItem[] = []
+  for (let n = 1; n <= 6; n++) items = addHubItem(items, { kind: 'gem', label: `gem ${n}`, at: n }).items
+  const added = addHubItem(items, { kind: 'statue', label: 'seventh', at: 7 })
+  expect(added.items.length).toBe(6)
+  expect(added.retired?.label).toBe('gem 1')
+  expect(added.items[5]!.label).toBe('seventh')
+})
+
+test('at home he keeps himself busy at random, room to room: garden, keepsakes, the film, a rest', async () => {
+  let seed = 7
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+  const st = new Stage(rand)
+  st.frame(100, 10)
+  st.setHome([{ kind: 'trophy', label: 'won', at: 1 }])
+  st.startHome()
+  const seen = new Set<string>()
+  for (let t = 1_000_000; t < 1_000_000 + 20 * 60_000; t += 100) {
+    st.step(t)
+    if (t % 1000 === 0) st.frame(100, 10)
+    const doing = st.homeDoing
+    if (doing && !doing.endsWith(':walking') && !doing.endsWith(':idle')) seen.add(doing)
+  }
+  for (const doing of ['garden:tend', 'hall:admire', 'den:movie', 'den:rest']) expect(seen.has(doing)).toBe(true)
+})
+
+test('whatever he is doing at home, a new turn has him drop it and sprint for the door', async () => {
+  for (const pastime of ['tend', 'movie', 'rest', 'admire'] as const) {
+    const st = new Stage(() => 0.5)
+    st.frame(100, 10)
+    st.setHome([{ kind: 'gem', label: 'x', at: 1 }])
+    st.startHome()
+    ;(st as unknown as { nextPastime: string }).nextPastime = pastime
+    let t = 1_000_000
+    // let him get there and settle in
+    while (!(st.homeDoing ?? '').endsWith(pastime) && t < 1_060_000) st.step((t += 100))
+    for (const end = t + 4000; t < end; t += 100) st.step(t)
+    expect(st.homeDoing?.endsWith(pastime)).toBe(true)
+    st.leaveHome()
+    st.queue(sceneOf({ setting: 'forest', props: [], beats: [{ do: 'wait', secs: 1 }] }))
+    const start = t
+    while (st.home && t < start + 20_000) st.step((t += 50))
+    expect(t - start).toBeLessThan(6000)
+  }
 })

@@ -8,7 +8,7 @@ import { DEMO_MS, demoScene, feelBeat } from './demo'
 import { SYSTEM, buildPrompt, describeCall, varietyNotes } from './director'
 import { MAX_INTERLUDES, addTiming, blendLatency, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { Timings } from './pacing'
-import { HUB_STORE_KEY, HUB_TOOL, HUB_TOOL_SPEC, addHubItem, asHubItems, hubItemFrom } from './hub'
+import { HUB_STORE_KEY, HUB_TOOL, HUB_TOOL_SPEC, MAX_HUB_ITEMS, addHubItem, asHubItems, hubItemFrom } from './hub'
 import type { HubItem } from './hub'
 import { MOODS, clip, parseScene } from './scene'
 import type { Mood, Scene, Stamp } from './scene'
@@ -29,6 +29,27 @@ const FRAME_MS = 50
 const MAX_ROWS = 10
 const MIN_ROWS = 6
 const KEY = 'stage'
+const PET_KEY = 'pet'
+// what he says back to a pat: shown in the chat, never read by the model
+const PET_LINES = [
+  'Aw, thank you! You are doing great, honestly.',
+  'That made my day. Keep going, you have got this.',
+  'Thanks for the pat! Whatever you are building, it is coming along nicely.',
+  'Hehe. You are a good human. Do not forget to drink some water.',
+  'Thank you! Every bug you fix makes the world a tiny bit better.',
+  'Back at you! Proud of the work you are putting in.',
+  'Take a breath: you are doing better than you think.',
+  'Thanks! The hard days count too. Especially those.',
+  'Aww. You deserve a pat as well. Consider yourself patted.',
+  'Thank you! I like working with you.',
+  'Noted, appreciated, and returned. You have got this.',
+  'Thanks for stopping by! Small steps still move things forward.',
+  'Hehe, that tickles. Good work today.',
+  'Thank you! Whatever comes next, we will figure it out together.',
+  'Recharged! Ready when you are.',
+  'Thanks! Be as kind to yourself as you are to me.',
+]
+let lastPetLine = -1
 const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
 const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
 const WEATHER_MS = 180_000 // failures this recent cloud the sky
@@ -286,6 +307,14 @@ function observe(e: Record<string, unknown>, ran: { isError?: boolean; deny?: st
   if (failed) fail()
 }
 
+/** A line for a pat, never the same one twice running. */
+function petLine(): string {
+  let i = Math.floor(Math.random() * PET_LINES.length)
+  if (i === lastPetLine) i = (i + 1) % PET_LINES.length
+  lastPetLine = i
+  return `♥ ${PET_LINES[i]}`
+}
+
 function showTasks() {
   if (tasksMade > 0) stage.progress = { done: Math.min(tasksDone.size, tasksMade), total: tasksMade }
 }
@@ -353,6 +382,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'comic-stats', description: 'Show the tokens the comic director has spent: this session and today' })
     await $.command.register({ name: 'comic-feel', description: `Make Claude act out a mood: ${FEELINGS.join(', ')}` })
 
+    await $.command.register({ name: 'comic-pet', description: 'Give the little Claude above the prompt a pat' })
     await $.command.register({ name: 'comic-hub', description: 'List the keepsakes in the comic hub, or remove one: /comic-hub remove <n>' })
     // the hub: the session opens there, among the keepsakes of earlier sessions
     hubItems = asHubItems(await $.store.get(HUB_STORE_KEY))
@@ -409,10 +439,25 @@ ${formatTimings(timings, latencyMs, answered)}` }
     const item = hubItemFrom(e, Date.now())
     if ('error' in item) return { result: `Not added: ${item.error}.` }
     hubAdds++
-    hubItems = addHubItem(hubItems, item)
+    const { items, retired } = addHubItem(hubItems, item)
+    hubItems = items
     await $.store.set(HUB_STORE_KEY, hubItems)
+    stage.setHome(hubItems.slice(0, -1))
     stage.addHomeItem(item)
-    return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.` }
+    const room = retired ? ` The hub holds ${MAX_HUB_ITEMS}, so the oldest, the ${retired.kind} "${retired.label}", was retired.` : ''
+    return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.${room}` }
+  })
+
+  // a pat: the ♥ at the band's edge, or /comic-pet
+  on('ui.press', { element: PET_KEY }, async $ => {
+    stage.pet()
+    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: petLine() }] } })
+    return { element: PET_KEY }
+  })
+
+  on('command.run', { command: 'comic-pet' }, async () => {
+    stage.pet()
+    return { text: petLine() }
   })
 
   on('command.run', { command: 'comic-feel' }, async ($, e) => {
@@ -571,9 +616,17 @@ ${formatTimings(timings, latencyMs, answered)}` }
       return next(e)
     }
 
-    const columns = Math.max(20, Math.min(512, e.props.bodyColumns))
+    // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own)
+    const columns = Math.max(20, Math.min(512, e.props.bodyColumns - 2))
     mount = { requestId: e.requestId, columns, rows }
-    const { Raster } = $.ui.resolve(e)
-    return <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
+    const { Box, Button, Raster } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row">
+        <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
+        <Box flexDirection="column" paddingLeft={1}>
+          <Button key={PET_KEY} plain onPress={() => undefined}>♥</Button>
+        </Box>
+      </Box>
+    )
   })
 }

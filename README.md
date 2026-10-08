@@ -18,10 +18,14 @@ set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 
 A pixel comic in the band above the prompt: a little Claude acts out what the agent is doing.
 
-- **Home hub**: each session opens at Claude's home, among keepsakes from earlier sessions. On the first
-  turn he walks through the door into the turn's world; after a long idle he comes back and naps.
+- **Home hub**: each session opens at Claude's home: a hall with keepsakes from earlier sessions, a garden
+  and a den. While nothing is happening he keeps himself busy at random, like a screensaver: he waters the
+  flowers, watches a film on the couch, lies down in bed for a rest, or strolls past his keepsakes. On any
+  new turn he drops everything and sprints through the door (there is one in every room) into the turn's
+  world; after a long idle he comes back home.
   Claude can add a keepsake (a trophy, a gem, a plant...) after a real milestone, with the mod's own
-  tool (`hub_add`, deferred, so it costs no context until used). `/comic-hub` lists them.
+  tool (`hub_add`, deferred, so it costs no context until used); the hub keeps six. `/comic-hub` lists them.
+- **Pet him**: click the ♥ beside the band (or `/comic-pet`) and he lights up, with a kind word in the chat.
 - **Needs you**: when a permission prompt or a question is waiting, he stops, turns to you and waves.
 - **Progress**: the agent's task list shows as a trail along the ground, with a flag at the end.
 - **Git**: a commit plants a little flag, a push lets a balloon go.
@@ -31,7 +35,7 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
   scenes in between; `full` stages everything with the model; `off` uses no tokens at all.
   Set it with `/config`, along with the model, pace and whether the comic stays up between turns.
 
-Commands: `/comic` (on/off), `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
+Commands: `/comic` (on/off), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
 
 ## Development
 

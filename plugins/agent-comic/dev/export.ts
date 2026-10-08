@@ -79,6 +79,18 @@ const world = scene({
   beats: [{ do: 'walk', to: 30 }, { do: 'type', at: 'c', secs: 3 }, { do: 'wait', secs: 2 }],
 })
 const working = scene({ setting: 'meadow', props: [{ id: 'c', kind: 'computer', x: 60 }], beats: [{ do: 'walk', to: 30 }, { do: 'type', at: 'c', secs: 6 }] })
+/** At home, settled into a pastime as the clip starts: the lead-in runs just long enough for it. */
+function settle(s: Stage, pastime: string) {
+  s.setHome(KEEPSAKES)
+  s.startHome()
+  ;(s as unknown as { nextPastime: string }).nextPastime = pastime
+  const doing = () => (s as unknown as { pastime: { phase: string } | null }).pastime?.phase === 'do'
+  let t = 960_000
+  while (!(doing() && (s.homeDoing ?? '').endsWith(pastime)) && t < 999_000) s.step((t += 100))
+  // shift: the clip's clock starts at 1_000_000, so step on from where we are without a gap
+  for (let k = 0; k < 20; k++) s.step((t += 50))
+  ;(s as unknown as { last: number }).last = 0
+}
 const features: Record<string, Feature> = {
   'hub-start': { shows: 'the session opens at home: keepsakes from earlier sessions, labels as he strolls by', ms: 9000, columns: 90,
     setup: s => { s.setHome(KEEPSAKES); s.startHome() } },
@@ -101,6 +113,13 @@ const features: Record<string, Feature> = {
       ;(s as unknown as { x: number }).x = 4
     },
     at: [[800, s => { s.leaveHome(); s.queue(world) }]] },
+  'hub-garden': { shows: 'at home: in the garden he waters the flowers, which grow and bloom', ms: 9000, columns: 100, setup: s => settle(s, 'tend') },
+  'hub-movie': { shows: 'at home: on the couch in the den, watching a film', ms: 7000, columns: 100, setup: s => settle(s, 'movie') },
+  'hub-rest': { shows: 'at home: a rest in bed, tucked in', ms: 5000, columns: 100, setup: s => settle(s, 'rest') },
+  'hub-rooms': { shows: 'at home: off one edge and in from the other, to the next room', ms: 9000, columns: 100,
+    setup: s => { s.setHome(KEEPSAKES); s.startHome(); (s as unknown as { nextPastime: string }).nextPastime = 'movie'; for (let t = 994_000; t < 1_000_000; t += 100) s.step(t) } },
+  'hub-interrupt': { shows: 'a new turn while he watches a film: up off the couch and a sprint for the door', ms: 5000, columns: 100,
+    setup: s => settle(s, 'movie'), at: [[1000, s => { s.leaveHome(); s.queue(world) }]] },
   'needs-you': { shows: 'a permission prompt or a question: he stops, turns to you and waves', ms: 6000, columns: 70,
     setup: s => s.queue(working),
     at: [[1500, s => { s.attention = 'permission' }], [4500, s => { s.attention = null }]] },

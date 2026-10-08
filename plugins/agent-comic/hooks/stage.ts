@@ -5,7 +5,10 @@ import type { Beat, Hat, Mood, Prop, Scene } from './scene'
 import { BALLOON, BITS, HATS_ART, MINI_HEIGHT, MINI_WIDTH, miniClaude, CLAUDE_HEIGHT, MOOD_ICONS, CLAUDE_WIDTH, FLAG_WAVE, LOOKS, ORANGE, P, PROPS, SKY_ART, TINTS, bookColor, claude } from './sprites'
 import type { Arm, Face, Look, Tint } from './sprites'
 import type { HubItem } from './hub'
-import { CLOUD, DOOR, HUB_ART, HUB_LOOK, RAIN, RAIN_CLOUD } from './hubart'
+import {
+  BED, BED_HEAD_X, BED_OVER, CLOUD, COUCH_BACK, COUCH_FRONT, DEN_LOOK, DOOR, FLOWER_COLORS, FLOWER_STAGES, GARDEN_LOOK, HUB_ART, HUB_LOOK,
+  RAIN, RAIN_CLOUD, TV, TV_SCREEN, WATERING_CAN, claudeLying, flowerPalette,
+} from './hubart'
 
 const MAX_HELPERS = 3 // small Claudes (subagents) on screen at once
 const DOZE_MS = 120_000 // idle this long and Claude falls asleep (or, between turns, goes home)
@@ -23,6 +26,24 @@ const PENNANT = { rows: ['phh', 'pyy', 'p..', 'p..', 'p..'], palette: { p: P.sil
 const GOAL_FLAG = { rows: ['phh', 'prr', 'p..', 'p..'], palette: { p: P.silver, h: P.coral, r: P.red } }
 const GOAL_FLAG_DONE = { rows: ['phh', 'pyy', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
 const BALLOON_UP = { rows: ['.r.', 'rhr', 'rrr', '.r.', '.s.', 's..'], palette: { r: P.red, h: P.coral, s: P.silver } }
+
+/** The hub's rooms, left to right; the door to the turn's world stands in each of them. */
+const ROOMS = ['garden', 'hall', 'den'] as const
+export type Room = (typeof ROOMS)[number]
+const ROOM_LOOK: Record<Room, Look> = { garden: GARDEN_LOOK, hall: HUB_LOOK, den: DEN_LOOK }
+/** What he does at home while nothing calls him away: a calm round at random, like a screensaver. */
+export type Pastime = 'admire' | 'tend' | 'rest' | 'movie'
+const PASTIMES: Record<Pastime, { room: Room; weight: number; secs: [number, number] }> = {
+  admire: { room: 'hall', weight: 2, secs: [15, 30] },
+  tend: { room: 'garden', weight: 3, secs: [25, 45] },
+  rest: { room: 'den', weight: 2, secs: [30, 60] },
+  movie: { room: 'den', weight: 3, secs: [30, 60] },
+}
+const HOME_PACE = 0.6 // he strolls about at home
+const FLOWER_COUNT = 5
+const FLOWER_STEP = 7 // columns from one flower to the next
+const WATER_SECS = 5 // one flower's watering
+const SIT_LIFT = 2 // seated on the couch he sits this many pixels up, his legs behind its front
 
 /** The session's sky, kept quiet: the local hour, and weather that follows how the work goes. */
 export type Weather = 'clear' | 'cloudy' | 'rain'
@@ -145,6 +166,14 @@ export class Stage {
   private newItem: { at: number; item: HubItem } | null = null
   private pennants: number[] = [] // commits: little flags planted in this world, by column
   private homeLabels: { col: number; row: number; text: string; color: number }[] = [] // drawn over the figure
+
+  private room: Room = 'hall'
+  private pastime: { kind: Pastime; phase: 'go' | 'do'; until: number; next: number; flower: number } | null = null
+  private lastPastime: Pastime | null = null
+  private nextPastime: Pastime | null = null // asked for: home after a long idle he goes to bed
+  private pastimeAt = -1 // when the next may start; -1: a few seconds after the first step at home
+  private trip: { to: Room; dir: 1 | -1 } | null = null
+  private flowers: { stage: number; color: number }[] = []
 
   private calling: Attention | null = null
   private callingSince = 0
@@ -288,6 +317,11 @@ export class Stage {
     this.isPendingUrgent = true
   }
 
+  /** At home, the room he is in and what he is doing there (`hall:admire`); null away. */
+  get homeDoing(): string | null {
+    return this.isHome ? `${this.room}:${this.trip ? 'walking' : this.pastime?.kind ?? 'idle'}` : null
+  }
+
   /** True at home: the hub, before the first turn or after a long idle. */
   get home(): boolean {
     return this.isHome
@@ -303,6 +337,7 @@ export class Stage {
     this.homeItems = [...this.homeItems, item]
     if (!this.isHome) return
     this.newItem = { at: this.now, item }
+    this.nextPastime = 'admire'
     const spot = this.homeSpots().find(h => h.item === item)
     for (let k = 0; k < 5; k++) this.give('sparkle', spot ? spot.col + 3 + Math.round(this.rand() * 4 - 2) : undefined)
   }
@@ -326,6 +361,7 @@ export class Stage {
     this.facing = -1
     this.doorOpenUntil = this.now + 900
     this.isNapping = true
+    this.nextPastime = 'rest'
   }
 
   /**
@@ -335,7 +371,11 @@ export class Stage {
    */
   leaveHome(): boolean {
     if (!this.isHome || this.leaving) return false
-    const isWaking = this.isDozing
+    const isWaking = this.isDozing || this.isResting
+    // whatever he was doing at home, he drops it
+    this.pastime = null
+    this.trip = null
+    this.lift = 0
     this.leaving = { phase: isWaking ? 'wake' : 'walk', at: this.now, isSprint: true }
     this.emote = isWaking ? { mood: 'surprised', until: this.now + 700 } : null
     this.wanderTo = null
@@ -361,6 +401,14 @@ export class Stage {
       if (this.bubble) this.bubble.until += d
     }
     this.calling = why
+  }
+
+  /** A pat from the person: hearts and a love balloon (and, napping, he wakes up for it). */
+  pet() {
+    if (this.hidden) return
+    this.emote = { mood: 'love', until: this.now + 2600 }
+    this.balloon = { mood: 'love', until: this.now + 2600 }
+    for (let k = 0; k < 3; k++) this.give('heart')
   }
 
   /** A commit plants a little flag beside him; a push sends a balloon up. */
@@ -391,6 +439,10 @@ export class Stage {
     this.leaving = null
     this.isNapping = false
     this.idleSince = null // idle from the next step, on its clock
+    this.room = 'hall'
+    this.pastime = null
+    this.trip = null
+    this.pastimeAt = -1
   }
 
   /** Where he stands to go through the door, or after stepping out of it. */
@@ -451,12 +503,12 @@ export class Stage {
 
   private mood(): Mood {
     // long idle (no scene for a while, e.g. between turns): he dozes off until the next scene
-    if (this.isDozing) return 'sleepy'
+    if (this.isDozing || this.isResting) return 'sleepy'
     return this.emote?.mood ?? this.scene.mood
   }
 
   private get isDozing(): boolean {
-    return !this.emote && !this.run && !this.leaving && !this.calling && this.idleMs >= (this.isHome && this.isNapping ? HOME_DOZE_MS : DOZE_MS)
+    return !this.emote && !this.run && !this.leaving && !this.calling && !this.pastime && !this.trip && this.idleMs >= (this.isHome && this.isNapping ? HOME_DOZE_MS : DOZE_MS)
   }
 
   /** Advances the animation to `now` (ms). */
@@ -516,6 +568,7 @@ export class Stage {
     }
 
     if (this.run) this.play(this.run, dt)
+    else if (this.isHome && !this.isAway) this.stepHome(dt)
     else if (now >= this.restUntil) this.idle(dt)
     this.stepHelpers(dt)
 
@@ -827,12 +880,183 @@ export class Stage {
       if (this.walk(this.wanderTo, dt * 0.5)) this.wanderTo = null
     } else if (this.now > this.wanderAt) {
       this.wanderAt = this.now + 3000 + this.rand() * 4000
-      const spots = this.isHome ? this.homeSpots() : []
-      if (spots.length && this.rand() < 0.7) {
-        // at home he strolls over to look at one of his keepsakes
-        const s = spots[Math.floor(this.rand() * spots.length)]!
-        this.wanderTo = clamp(s.col + 3 - Math.floor(CLAUDE_WIDTH / 2) + (this.rand() < 0.5 ? -9 : 9), 0, this.maxX())
-      } else if (this.rand() < 0.6) this.wanderTo = clamp(this.x + (this.rand() * 16 - 8), 0, this.maxX())
+      if (this.rand() < 0.6) this.wanderTo = clamp(this.x + (this.rand() * 16 - 8), 0, this.maxX())
+    }
+  }
+
+  private get isResting(): boolean {
+    return this.isHome && this.pastime?.kind === 'rest' && this.pastime.phase === 'do'
+  }
+
+  private get isWatching(): boolean {
+    return this.isHome && this.pastime?.kind === 'movie' && this.pastime.phase === 'do'
+  }
+
+  private get isTending(): boolean {
+    return this.isHome && this.pastime?.kind === 'tend' && this.pastime.phase === 'do'
+  }
+
+  /** At home with nothing to play: a pastime, the walk to its room, or a pause between two. */
+  private stepHome(dt: number) {
+    this.bob = 0
+    if (this.trip) return this.stepTrip(dt)
+    const p = this.pastime
+    if (!p) {
+      if (this.pastimeAt < 0) this.pastimeAt = this.now + 4000
+      if (this.now < this.pastimeAt) return
+      const kind = this.pickPastime()
+      this.pastime = { kind, phase: 'go', until: 0, next: 0, flower: Math.floor(this.rand() * FLOWER_COUNT) }
+      const room = PASTIMES[kind].room
+      if (room !== this.room) this.trip = { to: room, dir: ROOMS.indexOf(room) > ROOMS.indexOf(this.room) ? 1 : -1 }
+      return
+    }
+    if (p.phase === 'go') {
+      const spot = this.pastimeSpot(p)
+      if (spot === null) return this.endPastime() // no room for it at this width
+      if (!this.walk(spot, dt * HOME_PACE)) return
+      const [lo, hi] = PASTIMES[p.kind].secs
+      p.phase = 'do'
+      p.until = this.now + (lo + this.rand() * (hi - lo)) * 1000
+      p.next = this.now
+      if (p.kind === 'movie' || p.kind === 'tend') this.facing = 1
+      return
+    }
+    if (this.now >= p.until) return this.endPastime()
+    switch (p.kind) {
+      case 'admire': return this.admire(dt)
+      case 'tend': return this.tend(p, dt)
+      case 'movie':
+        // now and then the film gets a reaction
+        if (this.now >= p.next) {
+          p.next = this.now + 7000 + this.rand() * 7000
+          if (p.next > this.now + 7500) this.react = { glyph: ['!', '?', '♪', '♥'][Math.floor(this.rand() * 4)]!, until: this.now + 1400 }
+        }
+        return
+      case 'rest':
+        return
+    }
+  }
+
+  private endPastime() {
+    const p = this.pastime
+    if (p?.kind === 'tend') this.flowerTended(p.flower)
+    this.lastPastime = p?.kind ?? null
+    this.pastime = null
+    this.lift = 0
+    this.pastimeAt = this.now + 3000 + this.rand() * 5000
+  }
+
+  private pickPastime(): Pastime {
+    const asked = this.nextPastime
+    this.nextPastime = null
+    if (asked) return asked
+    const options = (Object.keys(PASTIMES) as Pastime[]).filter(k => k !== this.lastPastime && (k !== 'admire' || this.homeItems.length))
+    const total = options.reduce((sum, k) => sum + PASTIMES[k].weight, 0)
+    let r = this.rand() * total
+    for (const k of options) if ((r -= PASTIMES[k].weight) < 0) return k
+    return options[0] ?? 'tend'
+  }
+
+  /** Out one side of the room and in from the other side of the next, until he is where the pastime is. */
+  private stepTrip(dt: number) {
+    const t = this.trip!
+    if (this.room === t.to) {
+      this.trip = null // in from the edge: the pastime's own walk takes him to its spot
+      return
+    }
+    this.facing = t.dir
+    this.moving = true
+    this.x += t.dir * this.pace.walk * HOME_PACE * dt
+    const isOut = t.dir > 0 ? this.x >= this.columns + 1 : this.x <= -CLAUDE_WIDTH - 1
+    if (!isOut) return
+    this.room = ROOMS[ROOMS.indexOf(this.room) + t.dir]!
+    this.x = t.dir > 0 ? -CLAUDE_WIDTH : this.columns
+  }
+
+  /** Where he stands for a pastime in its room, or null when the room has no space for it. */
+  private pastimeSpot(p: { kind: Pastime; flower: number }): number | null {
+    const den = this.denLayout()
+    switch (p.kind) {
+      case 'admire': return clamp(this.x, 0, this.maxX())
+      case 'tend': {
+        const col = this.flowerCol(p.flower)
+        return col === null ? null : clamp(col - CLAUDE_WIDTH + 1, 0, this.maxX())
+      }
+      case 'movie': return den.tv === null ? null : den.couch + 3
+      case 'rest': return den.bed === null ? null : den.bed + BED_HEAD_X
+    }
+  }
+
+  /** The den's furniture by column, left to right, each null where it would not fit before the door. */
+  private denLayout(): { bed: number | null; couch: number; tv: number | null } {
+    const room = this.doorCol() - 2
+    const bed = 2
+    const couch = bed + BED.rows[0]!.length + 4
+    const tv = couch + COUCH_BACK.rows[0]!.length + 5
+    return { bed: bed + BED.rows[0]!.length <= room ? bed : null, couch, tv: tv + TV.rows[0]!.length <= room ? tv : null }
+  }
+
+  private flowerCol(i: number): number | null {
+    const start = Math.max(3, Math.round(this.doorCol() * 0.2))
+    const col = start + i * FLOWER_STEP
+    return col + FLOWER_STAGES[0]![0]!.length <= this.doorCol() - 2 ? col : null
+  }
+
+  /** At the keepsakes: strolls from one to another, the label up as he stands by it. */
+  private admire(dt: number) {
+    if (this.wanderTo !== null) {
+      if (this.walk(this.wanderTo, dt * HOME_PACE)) this.wanderTo = null
+      return
+    }
+    if (this.now < this.wanderAt) return
+    this.wanderAt = this.now + 3000 + this.rand() * 4000
+    const spots = this.homeSpots()
+    if (!spots.length) return
+    const s = spots[Math.floor(this.rand() * spots.length)]!
+    this.wanderTo = clamp(s.col + 3 - Math.floor(CLAUDE_WIDTH / 2) + (this.rand() < 0.5 ? -9 : 9), 0, this.maxX())
+  }
+
+  /** In the garden: kneels by a flower with the can, a few drops falling, then moves on to the next. */
+  private tend(p: { next: number; flower: number }, dt: number) {
+    const spot = this.flowerCol(p.flower)
+    const at = spot === null ? null : clamp(spot - CLAUDE_WIDTH + 1, 0, this.maxX())
+    if (at !== null && Math.abs(this.x - at) > 0.5) {
+      this.walk(at, dt * HOME_PACE)
+      p.next = this.now
+      return
+    }
+    this.facing = 1
+    this.bob = Math.floor(this.now / 700) % 2
+    if (this.rand() < 9 * dt) {
+      const spout = Math.round(this.x) + CLAUDE_WIDTH + 3
+      const top = this.spriteTop ?? this.rows * 2 - 9
+      this.dirt.push({ x: spout, y: top + 3, vx: 1 + this.rand(), vy: 1, until: this.now + 500, color: P.sky })
+    }
+    if (this.now - p.next >= WATER_SECS * 1000) {
+      // this one is watered: it grows a stage; on to another
+      this.flowerTended(p.flower)
+      let next = Math.floor(this.rand() * FLOWER_COUNT)
+      if (next === p.flower) next = (next + 1) % FLOWER_COUNT
+      p.flower = this.flowerCol(next) === null ? 0 : next
+      p.next = this.now
+    }
+  }
+
+  private flowerTended(i: number) {
+    this.ensureFlowers()
+    const f = this.flowers[i]
+    if (!f) return
+    if (f.stage < FLOWER_STAGES.length - 1) f.stage++
+    else if (this.rand() < 0.25) {
+      // a bloom that has had its day is picked, and a new seed goes in
+      f.stage = 0
+      f.color = Math.floor(this.rand() * FLOWER_COLORS.length)
+    }
+  }
+
+  private ensureFlowers() {
+    while (this.flowers.length < FLOWER_COUNT) {
+      this.flowers.push({ stage: Math.floor(this.rand() * FLOWER_STAGES.length), color: Math.floor(this.rand() * FLOWER_COLORS.length) })
     }
   }
 
@@ -1205,6 +1429,11 @@ export class Stage {
       back = 'mid'
       front = 'mid'
     }
+    if (this.isWatching) face = this.react ? 'happy' : 'right'
+    if (this.isTending) {
+      face = 'down'
+      front = 'mid'
+    }
     if (this.calling) {
       // turned to the person, one arm waving
       face = 'ahead'
@@ -1223,7 +1452,7 @@ export class Stage {
       this.x = clamp(this.x, 0, this.maxX())
     }
     const c = new Canvas(columns, rows)
-    const look = this.isHome || this.isAway ? HUB_LOOK : LOOKS[this.scene.setting]
+    const look = this.isHome || this.isAway ? ROOM_LOOK[this.room] : LOOKS[this.scene.setting]
     const H = rows * 2
     const now = this.now
 
@@ -1271,19 +1500,36 @@ export class Stage {
       ...pose,
       walk: this.moving ? Math.floor(now / (beat === 'run' || this.leaving?.isSprint ? 70 : 120)) : 0,
       airborne: this.lift > 1,
-      crouch: isSlumped || this.bob > 0 || (isStill && Math.floor(now / breathMs) % 2 === 1),
+      crouch: isSlumped || this.isWatching || this.bob > 0 || (isStill && Math.floor(now / breathMs) % 2 === 1),
       left: this.facing < 0,
     })
     const left = Math.round(this.x) + shake
     // the sprite stands on the ground; a crouch is shorter, so the head drops one pixel
     const top = H - 2 - art.length - Math.round(this.lift)
     this.spriteTop = top
-    if (this.hidden) {
+    if (this.hidden || this.isResting) {
+      if (this.isResting) {
+        // in bed: lying down, tucked in under the blanket
+        const lying = claudeLying(this.calling ? 'open' : 'shut')
+        const bed = this.denLayout().bed ?? 2
+        this.spriteTop = H - 2 - 2 - lying.length
+        c.sprite(bed + BED_HEAD_X, this.spriteTop, lying, TINTS.normal)
+        c.sprite(bed, H - 2 - BED_OVER.rows.length, BED_OVER.rows, BED_OVER.palette)
+      }
       for (const e of this.effects) drawEffect(c, e, now)
       if (bubble) this.drawBubble(c, bubble)
       return c.encode()
     }
-    c.sprite(left, top, art, TINTS[pose.tint])
+    const seated = this.isWatching ? SIT_LIFT : 0
+    c.sprite(left, top - seated, art, TINTS[pose.tint])
+    if (this.isWatching) {
+      const couch = this.denLayout().couch
+      c.sprite(couch, H - 2 - COUCH_FRONT.rows.length, COUCH_FRONT.rows, COUCH_FRONT.palette)
+    }
+    if (this.isTending) {
+      const can = WATERING_CAN
+      c.sprite(left + CLAUDE_WIDTH - 1, top + 2 + this.bob, can.rows, can.palette)
+    }
 
     // the hat: the turn's, or a nightcap while he dozes; tucked away while something rides overhead
     const hatName = this.isDozing ? 'nightcap' : this.scene.hat ?? 'none'
@@ -1394,6 +1640,9 @@ export class Stage {
   /** The hub: his keepsakes left of the door, the nearest one's label up, the door open as he passes. */
   private drawHome(c: Canvas, ground: number) {
     this.homeLabels = []
+    if (this.room === 'garden') this.drawGarden(c, ground)
+    if (this.room === 'den') this.drawDen(c, ground)
+    if (this.room !== 'hall') return this.drawDoor(c, ground)
     const near = this.x + CLAUDE_WIDTH / 2
     // every keepsake keeps its title up, dim; the one he stands by (or a new one) brightly
     const titles: { text: string; center: number; row: number; color: number; rank: number; order: number }[] = []
@@ -1420,9 +1669,53 @@ export class Stage {
       taken.push([row, left, left + width])
       this.homeLabels.push({ col: left, row, text: t.text, color: t.color })
     }
+    this.drawDoor(c, ground)
+  }
+
+  private drawDoor(c: Canvas, ground: number) {
     const isOpen = this.now < this.doorOpenUntil || this.leaving?.phase === 'open' || this.leaving?.phase === 'in'
     const door = isOpen ? DOOR.open : DOOR.closed
     c.sprite(this.doorCol(), ground - door.length, door, DOOR.palette)
+  }
+
+  /** The flower bed: a strip of soil, each flower at its stage. */
+  private drawGarden(c: Canvas, ground: number) {
+    this.ensureFlowers()
+    const first = this.flowerCol(0)
+    if (first === null) return
+    let last = first
+    this.flowers.forEach((f, i) => {
+      const col = this.flowerCol(i)
+      if (col === null) return
+      last = col + FLOWER_STAGES[0]![0]!.length
+      const rows = FLOWER_STAGES[f.stage]!
+      const [petal, shade] = FLOWER_COLORS[f.color]!
+      c.sprite(col, ground - rows.length, rows, flowerPalette(petal, shade))
+    })
+    for (let x = first - 1; x <= last; x++) c.set(x, ground, P.bark)
+  }
+
+  /** The den: the bed, the couch's back and the TV, its screen playing while he watches. */
+  private drawDen(c: Canvas, ground: number) {
+    const { bed, couch, tv } = this.denLayout()
+    if (bed !== null) c.sprite(bed, ground - BED.rows.length, BED.rows, BED.palette)
+    c.sprite(couch, ground - COUCH_BACK.rows.length, COUCH_BACK.rows, COUCH_BACK.palette)
+    if (tv === null) return
+    const top = ground - TV.rows.length
+    c.sprite(tv, top, TV.rows, TV.palette)
+    if (!this.isWatching) return
+    // the film: a sky and a ground that change with each cut, a figure crossing
+    const cut = Math.floor(this.now / 2600)
+    const skies = [P.sky, P.navy, P.plum, P.amber, P.slate]
+    const grounds = [P.leaf, P.moss, P.sand, P.steel, P.wood]
+    const s = TV_SCREEN
+    for (let y = 0; y < s.h; y++) {
+      for (let x = 0; x < s.w; x++) {
+        c.set(tv + s.x + x, top + s.y + y, y < Math.ceil(s.h / 2) ? skies[cut % skies.length]! : grounds[(cut * 3) % grounds.length]!)
+      }
+    }
+    const walker = Math.floor((this.now % 2600) / (2600 / s.w))
+    c.set(tv + s.x + walker, top + s.y + Math.ceil(s.h / 2) - 1, P.white)
   }
 
   /**

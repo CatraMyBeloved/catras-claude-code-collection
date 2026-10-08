@@ -7,7 +7,7 @@ import type { HubKind } from './hubart'
 
 export type HubItem = { kind: HubKind; label: string; at: number }
 
-export const MAX_HUB_ITEMS = 24 // kept in the store; the hub shows the newest that fit
+export const MAX_HUB_ITEMS = 6 // the hub keeps the newest six; a seventh retires the oldest
 export const MAX_HUB_LABEL = 16
 export const HUB_STORE_KEY = 'hub'
 export const HUB_TOOL = 'hub_add'
@@ -52,6 +52,8 @@ export function asHubItems(v: unknown): HubItem[] {
   return items.slice(-MAX_HUB_ITEMS)
 }
 
-export function addHubItem(items: readonly HubItem[], item: HubItem): HubItem[] {
-  return [...items, item].slice(-MAX_HUB_ITEMS)
+/** The hub with `item` added, and the keepsake it retired to make room, if any. */
+export function addHubItem(items: readonly HubItem[], item: HubItem): { items: HubItem[]; retired?: HubItem } {
+  const all = [...items, item]
+  return { items: all.slice(-MAX_HUB_ITEMS), retired: all.length > MAX_HUB_ITEMS ? all[0] : undefined }
 }
