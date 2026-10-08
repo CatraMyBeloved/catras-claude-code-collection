@@ -7,7 +7,7 @@ import type { Arm, Face, Look, Tint } from './sprites'
 import type { HubItem } from './hub'
 import {
   BED, BED_HEAD_X, BED_OVER, CLOUD, COUCH_BACK, COUCH_FRONT, DEN_LOOK, DOOR, FLOWER_COLORS, FLOWER_STAGES, GARDEN_LOOK, HUB_ART, HUB_LOOK,
-  RAIN, RAIN_CLOUD, TV, TV_SCREEN, WATERING_CAN, claudeLying, flowerPalette,
+  RAIN, RAIN_CLOUD, SLEEP_CAP, TV, TV_SCREEN, WATERING_CAN, claudeLying, flowerPalette,
 } from './hubart'
 
 const MAX_HELPERS = 3 // small Claudes (subagents) on screen at once
@@ -1514,6 +1514,7 @@ export class Stage {
         const bed = this.denLayout().bed ?? 2
         this.spriteTop = H - 2 - 2 - lying.length
         c.sprite(bed + BED_HEAD_X, this.spriteTop, lying, TINTS.normal)
+        c.sprite(bed + BED_HEAD_X + 1, this.spriteTop - 1, SLEEP_CAP.rows, SLEEP_CAP.palette)
         c.sprite(bed, H - 2 - BED_OVER.rows.length, BED_OVER.rows, BED_OVER.palette)
       }
       for (const e of this.effects) drawEffect(c, e, now)

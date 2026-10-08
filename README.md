@@ -25,7 +25,7 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
   world; after a long idle he comes back home.
   Claude can add a keepsake (a trophy, a gem, a plant...) after a real milestone, with the mod's own
   tool (`hub_add`, deferred, so it costs no context until used); the hub keeps six. `/comic-hub` lists them.
-- **Pet him**: click the ♥ beside the band (or `/comic-pet`) and he lights up, with a kind word in the chat.
+- **Pet him**: click the ♥ beside the band (or `/comic-pet`): he lights up, and a headpat is sent as your message ("Here, have a headpat. You are doing amazing!"), which Claude answers.
 - **Needs you**: when a permission prompt or a question is waiting, he stops, turns to you and waves.
 - **Progress**: the agent's task list shows as a trail along the ground, with a flag at the end.
 - **Git**: a commit plants a little flag, a push lets a balloon go.

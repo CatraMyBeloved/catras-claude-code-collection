@@ -30,26 +30,19 @@ const MAX_ROWS = 10
 const MIN_ROWS = 6
 const KEY = 'stage'
 const PET_KEY = 'pet'
-// what he says back to a pat: shown in the chat, never read by the model
+// a pat, sent as the person's own message: Claude reads it and answers
 const PET_LINES = [
-  'Aw, thank you! You are doing great, honestly.',
-  'That made my day. Keep going, you have got this.',
-  'Thanks for the pat! Whatever you are building, it is coming along nicely.',
-  'Hehe. You are a good human. Do not forget to drink some water.',
-  'Thank you! Every bug you fix makes the world a tiny bit better.',
-  'Back at you! Proud of the work you are putting in.',
-  'Take a breath: you are doing better than you think.',
-  'Thanks! The hard days count too. Especially those.',
-  'Aww. You deserve a pat as well. Consider yourself patted.',
-  'Thank you! I like working with you.',
-  'Noted, appreciated, and returned. You have got this.',
-  'Thanks for stopping by! Small steps still move things forward.',
-  'Hehe, that tickles. Good work today.',
-  'Thank you! Whatever comes next, we will figure it out together.',
-  'Recharged! Ready when you are.',
-  'Thanks! Be as kind to yourself as you are to me.',
+  'Here, have a headpat. You are doing amazing!',
+  '*pats your head* You are doing great, Claude.',
+  'Headpat delivery! Thanks for all the help today.',
+  'Here is a little headpat. Keep it up!',
+  '*gentle headpat* Proud of you.',
+  'Have a headpat, you have earned it!',
+  'Headpat break! You are doing wonderfully.',
+  '*pat pat* Great work so far.',
 ]
 let lastPetLine = -1
+let isPetTurn = false // Claude is answering a pat: the comic stays as it is
 const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
 const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
 const WEATHER_MS = 180_000 // failures this recent cloud the sky
@@ -133,7 +126,7 @@ async function direct($: EngineInterface) {
   // between turns, a long idle takes him home through the door
   if (!isTurnRunning && stage.wantsHome) stage.goHome()
   stage.ambience = { hour: new Date(now).getHours(), weather: weatherNow(now) }
-  if (askingIn === epoch || now < directorPausedUntil) return
+  if (askingIn === epoch || now < directorPausedUntil || isPetTurn) return
   if (!(await read($, enabled)) || askingIn === epoch) return
   const remainingMs = stage.remainingMs
   const untilFreeMs = stage.untilFreeMs
@@ -307,12 +300,12 @@ function observe(e: Record<string, unknown>, ran: { isError?: boolean; deny?: st
   if (failed) fail()
 }
 
-/** A line for a pat, never the same one twice running. */
+/** A pat's message, never the same one twice running. */
 function petLine(): string {
   let i = Math.floor(Math.random() * PET_LINES.length)
   if (i === lastPetLine) i = (i + 1) % PET_LINES.length
   lastPetLine = i
-  return `♥ ${PET_LINES[i]}`
+  return PET_LINES[i]!
 }
 
 function showTasks() {
@@ -451,13 +444,14 @@ ${formatTimings(timings, latencyMs, answered)}` }
   // a pat: the ♥ at the band's edge, or /comic-pet
   on('ui.press', { element: PET_KEY }, async $ => {
     stage.pet()
-    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: petLine() }] } })
+    await $.prompt.submit({ text: petLine(), asUser: true })
     return { element: PET_KEY }
   })
 
-  on('command.run', { command: 'comic-pet' }, async () => {
+  on('command.run', { command: 'comic-pet' }, async $ => {
     stage.pet()
-    return { text: petLine() }
+    await $.prompt.submit({ text: petLine(), asUser: true })
+    return { text: 'A headpat, on its way.' }
   })
 
   on('command.run', { command: 'comic-feel' }, async ($, e) => {
@@ -469,6 +463,12 @@ ${formatTimings(timings, latencyMs, answered)}` }
   })
 
   on('prompt.submit', async ($, e, next) => {
+    // a pat from the heart: he stays where he is, glowing, while Claude answers it; no world, no scenes
+    const origin = e.origin as { kind?: string; name?: string } | undefined
+    if (origin?.kind === 'plugin' && origin.name === 'agent-comic') {
+      isPetTurn = true
+      return next(e)
+    }
     linger?.cancel()
     // typed over the running turn, or delivered into it: the same story goes on
     if (e.turnId !== undefined) {
@@ -564,7 +564,7 @@ ${formatTimings(timings, latencyMs, answered)}` }
 
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
-    if (e.door === 'response' && !e.agentId) {
+    if (e.door === 'response' && !e.agentId && !isPetTurn) {
       const text = e.message.content
         .map(b => (b.type === 'text' ? b.text : ''))
         .join(' ')
@@ -583,6 +583,10 @@ ${formatTimings(timings, latencyMs, answered)}` }
     const done = await next(e)
     // a subagent's turn ends inside the main one: its small Claude reports through SubagentStop
     if (e.agentId) return done
+    if (isPetTurn) {
+      isPetTurn = false
+      return done
+    }
     isTurnRunning = false
     stage.attention = null
     if (e.reason === 'aborted') {

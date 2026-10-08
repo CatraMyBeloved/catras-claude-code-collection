@@ -689,7 +689,11 @@ async function directorSession($: Engine, on: On, answer: (prompt: string, n: nu
   const systems: (readonly { text: string; cache?: boolean }[] | undefined)[] = []
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('prompt.submit', async (_$, e) => ({ text: e.text }))
+  const prompts: { text: string; origin: unknown }[] = []
+  on('prompt.submit', async (_$, e) => {
+    prompts.push({ text: e.text, origin: e.origin })
+    return { text: e.text }
+  })
   on('turn.complete', async (_$, e) => ({ text: e.answer }))
   on('model.complete', async (_$, e) => {
     asks.push(String(e.prompt))
@@ -706,7 +710,7 @@ async function directorSession($: Engine, on: On, answer: (prompt: string, n: nu
   const turn = (text: string, extra: object = {}) => $.prompt.submit({ text, ...extra } as Parameters<Engine['prompt']['submit']>[0])
   const done = (extra: object = {}) =>
     $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer', ...extra } as Parameters<Engine['turn']['complete']>[0])
-  return { clock, asks, systems, tools, turn, done }
+  return { clock, asks, systems, tools, prompts, turn, done }
 }
 
 test('an answer for an old turn never sets up the new one, and does not hold it up', async ($, on) => {
@@ -1019,20 +1023,23 @@ test('a new turn has him sprint for the door, awake or woken from a nap', async 
   expect(woken).toBeLessThan(awake + 1000) // the start up costs well under a second
 })
 
-test('a pat on the heart beside the band: he lights up, and a kind word lands in the chat', async ($, on) => {
+test('a pat on the heart beside the band sends a headpat as the person, and the comic stays home for it', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, { key: 'engine' }, 'engine') as RenderElement
   })
-  const session = mock.session(on)
-  await directorSession($, on, () => sceneIn('meadow'))
+  const s = await directorSession($, on, () => sceneIn('meadow'))
   const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
-  expect(await mounted.find({ key: 'pet' })).toBeDefined()
   await mounted.press({ key: 'pet' })
   await mounted.unmount()
-  const notes = session.appended().filter(r => r.message.type === 'system')
-  expect(notes.length).toBe(1)
-  expect(JSON.stringify(notes[0]!.message.content)).toContain('♥')
+  expect(s.prompts.length).toBe(1)
+  expect(s.prompts[0]!.text.toLowerCase()).toContain('pat')
+  expect(s.prompts[0]!.origin).toMatchObject({ kind: 'plugin', name: 'agent-comic' })
+  // Claude answers the pat: no world is set up for it, and no wrap-up after
+  await s.clock.advance(3000)
+  await s.done()
+  await s.clock.advance(3000)
+  expect(s.asks.length).toBe(0)
 })
 
 test('the hub keeps six keepsakes: a seventh retires the oldest', async () => {

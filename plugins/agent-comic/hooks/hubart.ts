@@ -160,33 +160,39 @@ export const TV_SCREEN = { x: 1, y: 1, w: 9, h: 4 }
 
 /** A bed, 17 wide and 5 tall: pillow on the left, blanket on the right. */
 export const BED: Art = {
+  // a cool slate frame and white linen, so the orange sleeper stands out from it
   rows: [
-    'tW...............',
-    'tWhppP.uuuuuuu...',
-    'tWpppPuUUUUUUUUtW',
-    'WWWWWWWWWWWWWWWWb',
-    'bb.............bb',
+    'f................',
+    'fppp.............',
+    'fpppmmmmmmmmmmmmf',
+    'FFFFFFFFFFFFFFFFF',
+    'll.............ll',
   ],
-  palette: { t: P.tan, W: P.wood, b: P.bark, h: P.white, p: 0xeae4f0, P: P.silver, u: 0x7cc0e8, U: 0x4a8fc4 },
+  palette: { f: P.steel, F: P.slate, l: P.night, p: P.white, m: P.silver, u: 0x7cc0e8, U: 0x4a8fc4 },
 }
-/** Where a lying Claude's head goes (the pillow's first column). */
-export const BED_HEAD_X = 2
-/** The blanket alone, same size as BED: draw it over a lying Claude so he looks tucked in. */
+/** Where a lying Claude's head goes: on the pillow, just inside the headboard. */
+export const BED_HEAD_X = 1
+/** The blanket alone, same size as BED: draw it over a lying Claude so he is tucked in to the neck. */
 export const BED_OVER: Art = {
   rows: [
     '.................',
-    '.......uuuuuuu...',
-    '......uUUUUUUUU..',
+    '.......uuuuuuuuu.',
+    '......uUUUUUUUUUf',
     '.................',
     '.................',
   ],
   palette: BED.palette,
 }
+/** The nightcap he sleeps in, drawn over the top of his head as he lies: 6 wide, 2 tall. */
+export const SLEEP_CAP: Art = {
+  rows: ['W.nNN.', '.nNNNN'],
+  palette: { n: P.sky, N: P.navy, W: P.white },
+}
 
-/** Claude lying on his back, head on the left: 12 wide, 3 tall, same palette keys as the figure. */
+/** Claude lying on his back, head on the left: 12 wide, 4 tall, same palette keys as the figure. */
 export function claudeLying(eyes: 'open' | 'shut'): string[] {
   const e = eyes === 'open' ? 'E' : 's'
-  return ['hhhhhhhhhhhs', `hO${e}O${e}OOOOOOs`, 'ssssssssssss']
+  return ['..hhhhhh....', '.hOOOOOOOOs.', `hO${e}O${e}OOOOOOs`, 'ssssssssssss']
 }
 
 /** The den: indoors, a wooden floor, a dim back wall of shelves in warm browns, a few dust motes. */
