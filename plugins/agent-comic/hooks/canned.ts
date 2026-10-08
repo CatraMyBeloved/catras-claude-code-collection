@@ -57,7 +57,19 @@ const KEYWORDS: [RegExp, Setting[]][] = [
   [/\b(web|api|http|fetch|network|server)\b/i, ['beach', 'space']],
 ]
 
-/** A turn's opening scene, setting up a world without a model. */
+/** Four props that belong in `setting`, spread across the ground: one to work at, three around it. */
+export function cannedProps(setting: Setting, rand: Rand): Prop[] {
+  const place = PLACES[setting]
+  const kinds: PropKind[] = [pick(place.work, rand), ...shuffle(place.rest, rand).slice(0, 3)]
+  const slots = shuffle([24, 44, 64, 84], rand)
+  return shuffle(kinds, rand).map((kind, i) => {
+    const p: Prop = { id: `${kind}${i}`, kind, x: slots[i]! + Math.round((rand() - 0.5) * 8) }
+    if (kind === 'sign') p.label = pick(SIGN_LABELS, rand)
+    return p
+  })
+}
+
+/** The session's opening scene, setting up its world without a model. */
 export function cannedFirst(goal: string, recent: readonly Setting[], rand: Rand): Scene {
   const last = recent[recent.length - 1]
   const lately = new Set(recent.slice(-3))
@@ -74,13 +86,7 @@ export function cannedFirst(goal: string, recent: readonly Setting[], rand: Rand
   const setting = pick(tier, rand)
 
   const place = PLACES[setting]
-  const kinds: PropKind[] = [pick(place.work, rand), ...shuffle(place.rest, rand).slice(0, 3)]
-  const slots = shuffle([24, 44, 64, 84], rand)
-  const props = shuffle(kinds, rand).map((kind, i) => {
-    const p: Raw = { id: `${kind}${i}`, kind, x: slots[i]! + Math.round((rand() - 0.5) * 8) }
-    if (kind === 'sign') p.label = pick(SIGN_LABELS, rand)
-    return p
-  })
+  const props: Raw[] = cannedProps(setting, rand)
   const hat: Hat = chance(0.4, rand) ? pick(place.hats, rand) : 'none'
 
   const ids = props.map(p => p.id as string)
@@ -170,7 +176,8 @@ function testChunk(c: Ctx, ok: boolean, afterFail: boolean): Chunk {
   const typed: Raw = pc ? { do: 'type', at: pc.id, secs: 2 } : { do: 'type', secs: 2 }
   const beats: Raw[] = [typed, { do: 'wait', secs: 1 }]
   if (ok) {
-    if (bug) beats.push({ do: 'squash', at: bug.id })
+    // the bug stays: only Claude's own tool changes the world, so he just looks it over, pleased
+    if (bug) beats.push({ do: 'look', at: bug.id, react: '!' })
     beats.push(afterFail || chance(0.6, c.rand) ? { do: 'celebrate' } : { do: 'dance', secs: 2 })
     return { mood: 'happy', beats }
   }
@@ -335,7 +342,7 @@ export function cannedWrap(world: World, lastSaid: string | undefined, aborted: 
 /** Holds a raw scene to the language; on any trouble a minimal valid scene plays instead. */
 function build(raw: Raw, world: World | undefined): Scene {
   try {
-    const scene = parseScene(JSON.stringify(raw), world)
+    const scene = parseScene(JSON.stringify(raw), world, { keepWorld: world !== undefined })
     if (!('error' in scene)) return scene
   } catch { /* fall through to the fallback */ }
   const minimal = { setting: world?.setting ?? 'meadow', props: [], beats: [{ do: 'ponder', secs: 2 }] }

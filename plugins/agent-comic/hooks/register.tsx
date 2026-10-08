@@ -12,6 +12,8 @@ import { HUB_STORE_KEY, HUB_TOOL, HUB_TOOL_SPEC, MAX_HUB_ITEMS, addHubItem, asHu
 import type { HubItem } from './hub'
 import { MOODS, clip, parseScene } from './scene'
 import type { Mood, Scene, Stamp } from './scene'
+import { MAX_PROP_CHANGES, MAX_SCENERY_CHANGES, WORLD_TOOL, WORLD_TOOL_SPEC, describeWorld, withProp, worldChangeFrom } from './world'
+import type { SessionWorld } from './world'
 import { PACES, Stage } from './stage'
 import type { Weather } from './stage'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
@@ -46,6 +48,7 @@ let isPetTurn = false // Claude is answering a pat: the comic stays as it is
 let pendingPats: string[] = [] // headpats sent, their turns not begun yet
 const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
 const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
+const WORLD_TOOL_NAME = new RegExp(`^mcp__agent-comic__${WORLD_TOOL}$`)
 const WEATHER_MS = 180_000 // failures this recent cloud the sky
 // tools that put a question to the person, who must answer before the turn goes on
 const ASKS_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode'])
@@ -73,7 +76,13 @@ let isWrapPending = false
 let previous: Scene | null = null
 let recent: Scene[] = [] // the last scenes Sonnet staged, for its variety notes
 let turnSettings: Scene['setting'][] = [] // one per turn, oldest first
-let turnSetting: Scene['setting'] | null = null // picked by the turn's first scene, then fixed
+let turnSetting: Scene['setting'] | null = null // the session world's setting, once its first scene set it up
+// the session's world: set up by its first scene, then changed only by Claude's world tool
+let sessionWorld: SessionWorld | null = null
+let isWorldShown = false // the stage shows the session's world (not home, not the demo's)
+let isOpening = false // a new turn's first scene is still to be staged: the model stages it, in the session's world
+let propChanges = 0
+let sceneryChanges = 0
 let hasLoggedError = false
 let linger: { cancel: () => void } | null = null
 let directorPausedUntil = 0 // while the demo or a /comic-feel plays, Sonnet waits
@@ -125,17 +134,20 @@ async function direct($: EngineInterface) {
   tellRunning()
   const now = Date.now()
   // between turns, a long idle takes him home through the door
-  if (!isTurnRunning && stage.wantsHome) stage.goHome()
+  if (!isTurnRunning && stage.wantsHome) {
+    stage.goHome()
+    isWorldShown = false
+  }
   stage.ambience = { hour: new Date(now).getHours(), weather: weatherNow(now) }
   if (askingIn === epoch || now < directorPausedUntil || isPetTurn) return
   if (!(await read($, enabled)) || askingIn === epoch) return
   const remainingMs = stage.remainingMs
   const untilFreeMs = stage.untilFreeMs
   // a canned scene is ready at once: it is asked for as the stage runs dry, not a model's latency ahead
-  const isCannedNext = isCanned(!turnSetting ? 'first' : isWrapPending ? 'wrap' : 'scene') || now < retryAfter
+  const isCannedNext = isCanned(!turnSetting ? 'first' : isWrapPending ? 'wrap' : 'scene', isOpening) || now < retryAfter
   const ask = nextAsk({
     now, pace: settings.pace, fresh, lastAsk, lastActivity, isTurnRunning, isWrapPending,
-    isWorldless: !turnSetting, interludes, remainingMs, untilFreeMs, latencyMs: isCannedNext ? 0 : latencyMs,
+    isWorldless: !turnSetting || isOpening, interludes, remainingMs, untilFreeMs, latencyMs: isCannedNext ? 0 : latencyMs,
   })
   if (!ask) return
   const finished = ask === 'wrap'
@@ -144,8 +156,10 @@ async function direct($: EngineInterface) {
   isWrapPending = false
   lastAsk = now
   // after the turn's first scene, scenes play in that world; before it, the first sets one up
-  const world = turnSetting ? stage.world() : undefined
+  const world = turnSetting ? directorWorld() : undefined
   const kind: Stamp['kind'] = finished ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
+  const isTurnOpening = isOpening && kind === 'scene'
+  if (kind !== 'interlude') isOpening = false
   const activity = isInterlude ? undefined : firstFreshAt
   const expectedLeftMs = isInterlude ? remainingMs : untilFreeMs
   const batch = acts
@@ -154,7 +168,7 @@ async function direct($: EngineInterface) {
   fresh = 0
   firstFreshAt = undefined
 
-  if (isCanned(kind) || now < retryAfter) {
+  if (isCanned(kind, isTurnOpening) || now < retryAfter) {
     const scene = canned(kind, batch, world)
     if (scene) stageScene(scene, isInterlude)
     return
@@ -180,7 +194,7 @@ async function direct($: EngineInterface) {
     // a new turn began while Sonnet worked: this scene belongs to the old one
     if (mine !== epoch) return
     if (!r.isAnswered) return logOnce($, `no scene (${r.reason})`)
-    const scene = parseScene(r.text, world)
+    const scene = parseScene(r.text, world, { keepWorld: world !== undefined })
     if ('error' in scene) return logOnce($, `unusable scene (${scene.error})`)
     stageScene(scene, isInterlude, { kind, activity, asked, answered: answeredAt, expectedLeftMs })
     isStaged = true
@@ -203,9 +217,13 @@ async function direct($: EngineInterface) {
   }
 }
 
-/** Whether a scene of this kind is canned under the /config director setting. */
-function isCanned(kind: Stamp['kind']): boolean {
-  return settings.director === 'off' || (settings.director === 'hybrid' && (kind === 'scene' || kind === 'interlude'))
+/**
+ * Whether a scene of this kind is canned under the /config director setting. Hybrid has the model
+ * stage the session's world, each turn's opening scene in it, and each wrap-up.
+ */
+function isCanned(kind: Stamp['kind'], isTurnOpening = false): boolean {
+  if (settings.director === 'off') return true
+  return settings.director === 'hybrid' && ((kind === 'scene' && !isTurnOpening) || kind === 'interlude')
 }
 
 /** A canned scene of `kind`; none for a wrap-up of a turn that never got a world. */
@@ -222,8 +240,11 @@ function stageScene(scene: Scene, isInterlude: boolean, stamp?: Stamp) {
   // the world changes between turns, not within one: later scenes keep the first scene's setting
   if (turnSetting) scene.setting = turnSetting
   else {
+    // the session's first scene: its world stays for the session
     turnSetting = scene.setting
     turnSettings = [...turnSettings, scene.setting].slice(-6)
+    sessionWorld = { setting: scene.setting, props: scene.props.map(p => ({ ...p })), hat: scene.hat ?? 'none' }
+    isWorldShown = true
   }
   previous = scene
   recent = [...recent, scene].slice(-6)
@@ -233,6 +254,22 @@ function stageScene(scene: Scene, isInterlude: boolean, stamp?: Stamp) {
   }
   scene.isNews = !isInterlude
   stage.queue(scene)
+}
+
+/**
+ * The world as the director should stage it: where the stage has the props now, with what Claude
+ * made of them (a change he asked for counts at once, before its animation has played).
+ */
+function directorWorld(): ReturnType<Stage['world']> {
+  const seen = stage.world()
+  if (!sessionWorld || seen.setting !== sessionWorld.setting) return seen
+  const now = new Map(sessionWorld.props.map(p => [p.id, p]))
+  return { ...seen, props: seen.props.map(p => (now.has(p.id) ? { ...p, kind: now.get(p.id)!.kind, label: now.get(p.id)!.label } : p)) }
+}
+
+/** A scene that loads the session's world as it stands, with a few beats to arrive on. */
+function worldScene(world: SessionWorld, beats: Scene['beats']): Scene {
+  return { setting: world.setting, mood: 'neutral', props: world.props.map(p => ({ ...p })), hat: world.hat, beats }
 }
 
 /** Clear, cloudy after a failure, rain after several: the last few minutes' work, in the sky. */
@@ -394,6 +431,7 @@ export const register: Register = (on, options) => {
     stage.setHome(hubItems)
     stage.startHome()
     await $.tool.register(HUB_TOOL_SPEC)
+    await $.tool.register(WORLD_TOOL_SPEC)
 
     $.clock.every(FRAME_MS, () => drawFrame($))
     $.clock.every(1000, () => direct($).catch(() => undefined))
@@ -410,6 +448,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'comic-demo' }, async $ => {
     stage.queue(demoScene(), true)
+    isWorldShown = false // the tour plays in a world of its own; the next turn goes back to the session's
     await showFor($, DEMO_MS)
     return { text: `Comic tour playing above the prompt (about ${Math.round(DEMO_MS / 1000)}s): ${FEELINGS.length} moods, then the actions.` }
   })
@@ -451,6 +490,42 @@ ${formatTimings(timings, latencyMs, answered)}` }
     stage.addHomeItem(item)
     const room = retired ? ` The hub holds ${MAX_HUB_ITEMS}, so the oldest, the ${retired.kind} "${retired.label}", was retired.` : ''
     return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.${room}` }
+  })
+
+  // the comic's world tool: only Claude changes the session's world, a prop or the whole scenery
+  on('tool.call', { tool: WORLD_TOOL_NAME }, async ($, e) => {
+    const change = worldChangeFrom(e, sessionWorld)
+    if ('error' in change) return { result: `Not changed: ${change.error}.` }
+    if (change.kind === 'look') return { result: sessionWorld ? describeWorld(sessionWorld) : 'No world yet: the first scene of the session sets it up.' }
+    if (change.kind === 'prop') {
+      if (propChanges >= MAX_PROP_CHANGES) return { result: `Not changed: the world already had its ${MAX_PROP_CHANGES} prop changes this session.` }
+      propChanges++
+      sessionWorld = withProp(sessionWorld!, change.id, change.into, change.label)
+      if (isWorldShown) stage.changeProp(change.id, change.into, change.label)
+      return { result: `Claude lifts ${change.id} and it becomes a ${change.into}${change.label ? ` "${change.label}"` : ''}. ${describeWorld(sessionWorld)}` }
+    }
+    if (sceneryChanges >= MAX_SCENERY_CHANGES) return { result: `Not changed: the scenery already changed ${MAX_SCENERY_CHANGES} times this session.` }
+    sceneryChanges++
+    sessionWorld = change.world
+    turnSetting = change.world.setting
+    turnSettings = [...turnSettings, change.world.setting].slice(-6)
+    // what the director was staging belongs to the old place
+    epoch++
+    const first = sessionWorld.props[0]
+    stage.changeScenery(worldScene(sessionWorld, [{ do: 'emote', mood: 'happy', secs: 1.5 }, ...(first ? [{ do: 'look' as const, at: first.id }] : [])]))
+    isWorldShown = true
+    return { result: `Claude summons a door and walks through into the ${change.world.setting}. ${describeWorld(sessionWorld)}` }
+  })
+
+  // a /clear is a new conversation: its first turn sets up a new world
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      sessionWorld = null
+      turnSetting = null
+      propChanges = 0
+      sceneryChanges = 0
+    }
+    return next(e)
   })
 
   // a pat: the ♥ at the band's edge, or /comic-pet
@@ -499,11 +574,17 @@ ${formatTimings(timings, latencyMs, answered)}` }
     lastAsk = 0
     isWrapPending = false
     isTurnRunning = true
-    turnSetting = null
+    // the session's world carries on: only its first turn sets one up
+    turnSetting = sessionWorld?.setting ?? null
+    isOpening = sessionWorld !== null
     note(`the person asked: ${goal}`)
-    // something to see at once while the world is set up: at home he heads for the door,
-    // elsewhere (idle, or asleep) he stops to think
-    if (!stage.leaveHome() && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
+    // something to see at once: at home he heads for the door, elsewhere (idle, or asleep) he stops to think
+    const isLeaving = stage.leaveHome()
+    // back from home (or the demo): the session's world loads as he steps in, as he left it
+    if (sessionWorld && !isWorldShown) {
+      stage.queue(worldScene(sessionWorld, [{ do: 'ponder', secs: 1.5 }]))
+      isWorldShown = true
+    } else if (!isLeaving && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
     askSoon($)
     return next(e)
   })

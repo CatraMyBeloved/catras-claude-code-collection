@@ -88,9 +88,15 @@ const isMood = (v: unknown): v is Mood => MOODS.includes(v as Mood)
 
 /**
  * Pulls the first JSON object out of a reply and holds it to the language. Given the
- * turn's `world`, the scene plays in it: its own setting and props are ignored.
+ * session's `world`, the scene plays in it: its own setting and props are ignored.
+ * `keepWorld`: the props stay what they are (only Claude's own tool changes them), so
+ * transform and squash beats are dropped.
  */
-export function parseScene(reply: string, world?: { setting: Setting; props: readonly Prop[] }): Scene | { error: string } {
+export function parseScene(
+  reply: string,
+  world?: { setting: Setting; props: readonly Prop[] },
+  opts: { keepWorld?: boolean } = {},
+): Scene | { error: string } {
   const start = reply.indexOf('{')
   const end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
@@ -136,6 +142,7 @@ export function parseScene(reply: string, world?: { setting: Setting; props: rea
         break
       case 'squash':
       case 'carry':
+        if (b.do === 'squash' && opts.keepWorld) break
         if (ids.has(b.at)) beats.push({ do: b.do, at: b.at })
         break
       case 'plant_sign': {
@@ -153,7 +160,7 @@ export function parseScene(reply: string, world?: { setting: Setting; props: rea
         if (signs.has(b.at)) beats.push({ do: 'pull_sign', at: b.at })
         break
       case 'transform':
-        if (ids.has(b.at) && PROP_KINDS.includes(b.into)) {
+        if (!opts.keepWorld && ids.has(b.at) && PROP_KINDS.includes(b.into)) {
           beats.push({ do: 'transform', at: b.at, into: b.into, label: str(b.label, 22) || undefined })
         }
         break

@@ -22,18 +22,23 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
 - **Home hub**: each session opens at Claude's home: a hall with keepsakes from earlier sessions, a garden
   and a den. While nothing is happening he keeps himself busy at random, like a screensaver: he waters the
   flowers, watches a film on the couch, lies down in bed for a rest, or strolls past his keepsakes. On any
-  new turn he drops everything and sprints through the door (there is one in every room) into the turn's
+  new turn he drops everything and sprints through the door (there is one in every room) into the session's
   world; after a long idle he comes back home.
   Claude can add a keepsake (a trophy, a gem, a plant...) after a real milestone, with the mod's own
   tool (`hub_add`, deferred, so it costs no context until used); the hub keeps six. `/comic-hub` lists them.
 - **Pet him**: the ♥ beside the band (click it in fullscreen mode, or press ctrl+x tab, then p), or `/comic-pet`: he lights up, and a headpat is sent as your message ("Here, have a headpat. You are doing amazing!"), which Claude answers.
+- **One world per session**: the session's first turn sets up a place (a setting, a hat and four props) and
+  every later turn plays in it, so the story can call back to earlier turns. The scenes never change it; only
+  Claude does, with the mod's world tool (`world_change`, deferred): he lifts a prop overhead and, with a puff,
+  it becomes something new (up to 6 per session), or he summons a door and walks through it into new scenery
+  (up to 2 per session). After a long idle he goes home, and the next turn takes him back into the same world.
 - **Needs you**: when a permission prompt or a question is waiting, he stops, turns to you and waves.
 - **Progress**: the agent's task list shows as a trail along the ground, with a flag at the end.
 - **Git**: a commit plants a little flag, a push lets a balloon go.
 - **Sky**: the local hour (moon at night, low sun at dusk) and the session's weather (clouds after
   failures, rain after several), kept in the background.
-- **Director**: `hybrid` (default) has the model stage each turn's opening and wrap-up, and plays canned
-  scenes in between; `full` stages everything with the model; `off` uses no tokens at all.
+- **Director**: `hybrid` (default) has the model set up the session's world and stage each turn's opening and
+  wrap-up in it, and plays canned scenes in between; `full` stages everything with the model; `off` uses no tokens at all.
   Set it with `/config`, along with the model, pace and whether the comic stays up between turns.
 
 Commands: `/comic` (on/off), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.

@@ -167,7 +167,7 @@ test('variety notes steer away from repeated settings and overused actions', asy
 test('once a turn has its setting, the prompt holds Sonnet to it', async () => {
   const v = varietyNotes([], () => 0, ['meadow', 'cave'], 'cave')
   const prompt = buildPrompt({ goal: 'x', log: ['read a.ts'], fresh: 1, previous: null, finished: false, variety: v })
-  expect(prompt).toContain('fixed for this turn: "cave"')
+  expect(prompt).toContain('fixed for this session: "cave"')
   expect(prompt).not.toContain('suggested setting')
 })
 
@@ -285,7 +285,7 @@ test('a quick follow-up never pushes out the scene that sets up the new world', 
 
 test('the request names the world after the first scene, and asks for one before it', async () => {
   const first = buildPrompt({ goal: 'x', log: ['read a.ts'], fresh: 1, previous: null, finished: false })
-  expect(first).toContain('FIRST scene of a new turn')
+  expect(first).toContain('FIRST scene of the session')
   const later = buildPrompt({
     goal: 'x', log: ['read a.ts'], fresh: 1, previous: null, finished: false,
     world: { setting: 'cave', props: [{ id: 'l', kind: 'lamp', x: 30 }], gone: ['b'] },
@@ -774,7 +774,7 @@ test('a failed wrap-up falls back to a canned one, and the model rests a while',
 
 test('with the director off, a whole turn plays without a single model call', { options: { director: 'off' } }, async ($, on) => {
   const s = await directorSession($, on, () => sceneIn('meadow'))
-  expect(s.tools).toEqual(['hub_add'])
+  expect(s.tools).toEqual(['hub_add', 'world_change'])
   await s.turn('refactor the parser')
   await s.clock.advance(3000)
   await s.done()

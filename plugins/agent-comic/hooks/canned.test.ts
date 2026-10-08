@@ -96,7 +96,13 @@ test('failures show worry, passing tests celebrate, and the same input varies wi
   const green = cannedScene([{ kind: 'fail' }, { kind: 'test', ok: true }], world, seeded(3))
   expect(green.mood).toBe('worried') // the failure is the most salient thing
   const pass = cannedScene([{ kind: 'test', ok: true }], world, seeded(3))
-  expect(pass.beats.map(b => b.do)).toContain('squash')
+  // the world stays as it is: no canned scene squashes or transforms a prop
+  expect(pass.beats.map(b => b.do)).not.toContain('squash')
+  for (const seed of SEEDS) {
+    for (const scene of [cannedScene(ACTS, world, seeded(seed)), cannedInterlude(world, 1, seeded(seed)), cannedWrap(world, 'done', false, seeded(seed))]) {
+      expect(scene.beats.some(b => b.do === 'squash' || b.do === 'transform')).toBe(false)
+    }
+  }
   expect(pass.beats.map(b => b.do)).toContain('celebrate')
   const shapes = new Set(SEEDS.map(s => JSON.stringify(cannedScene([{ kind: 'read' }, { kind: 'edit' }], world, seeded(s)).beats)))
   expect(shapes.size).toBeGreaterThan(3)

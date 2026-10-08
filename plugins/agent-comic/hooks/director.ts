@@ -11,7 +11,7 @@ Reply with ONLY a JSON object, no prose, no code fence:
 {
   "setting": one of ${SETTINGS.map(s => `"${s}"`).join(', ')},
   "mood": one of ${MOODS.map(m => `"${m}"`).join(', ')}   (Claude's mood for the whole scene),
-  "hat": one of ${HATS.map(h => `"${h}"`).join(', ')}   (first scene of a turn only: Claude wears it all turn),
+  "hat": one of ${HATS.map(h => `"${h}"`).join(', ')}   (first scene of the session only: Claude wears it with the world),
   "props": [ { "id": "short-id", "kind": one of ${PROP_KINDS.map(k => `"${k}"`).join(', ')}, "x": 0-100, "label": "optional, max 22 chars" } ],
   "beats": [ ... ]
 }
@@ -25,10 +25,8 @@ Beats run in order:
   {"do":"read","secs":3}   (holds an open book: reading files or docs)
   {"do":"type","at":"<computer prop id>"}   (walks to it and types: running commands, editing)
   {"do":"carry","at":"<prop id>"} then later {"do":"drop"}   (lifts a prop overhead and sets it down where Claude stands: moving or refactoring)
-  {"do":"transform","at":"<prop id>","into":"<prop kind>","label":"optional"}   (picks it up, a puff of magic smoke, it becomes the new item, sets it down)
   {"do":"plant_sign","label":"max 22 chars","x":0-100,"id":"optional short id"}   (hammers a new sign into the ground: mark a finding, a file, a TODO)
   {"do":"pull_sign","at":"<sign id>"}   (pulls a sign out of the ground and it vanishes: done, fixed, or wrong after all)
-  {"do":"squash","at":"<prop id>"}   (jumps on it, it disappears in a puff; great for bugs fixed)
   {"do":"ponder","secs":3}   (stands and contemplates: a "..." bubble, looks one way, then the other)
   {"do":"dance"}  {"do":"wave"}  {"do":"shrug"}  {"do":"dig"}  {"do":"jump"}  {"do":"celebrate"}  {"do":"wait","secs":1}
 
@@ -43,29 +41,30 @@ Guidelines:
   searching: digging for a chest in the desert or on the beach; lifting rocks to peek under them; hunting with a lamp at night.
   running commands or tests: typing at a computer planted somewhere odd (a dune, the moon, a beach) and waiting for its verdict.
   a bug or an error: a bug crawls out from behind a crate, rock or mushroom; Claude jumps back, surprised or worried.
-  fixing it: squash the bug; or carry the broken crate off and bring a sound one.
+  fixing it: stand over the bug and cheer; or carry the crate it hid behind to a better spot.
   writing or editing files: stacking crates, carrying a scroll to its sign, planting a flag.
   refactoring or moving code: carrying props from one place to another and setting them down in a new order.
   web research: a scroll from the sea, a signal from a far planet.  a long wait: night, a lamp, sitting by a mushroom, dozing.
-- One world per turn. The FIRST scene of a turn sets it up: a setting and exactly 4 props that belong together as one small place
-  (a desert dig site: cactus, chest, rock, a sign; a night camp: lamp, crate, scroll, flag). Later scenes of the turn get that world in
-  the request: do not send "props" then, refer to the props by their ids. A prop changes only when Claude changes it with transform
-  (e.g. a scroll becomes a computer when the reading turns into running tests); squashed props are gone for the rest of the turn.
+- One world per session. The session's FIRST scene sets it up: a setting and exactly 4 props that belong together as one small place
+  (a desert dig site: cactus, chest, rock, a sign; a night camp: lamp, crate, scroll, flag). Pick a place that can hold a whole
+  session of work. Every later scene gets that world in the request: do not send "props" then, refer to the props by their ids.
+  You never change the world: props are not destroyed or turned into other things in your scenes (the agent itself changes them
+  with a tool of its own, and the request then shows the new world). Carrying a prop to another spot is fine.
 - Signs are notes in the world, on top of the 4 props: when something concrete is found (a cause, a number, a file, a TODO),
   plant_sign it right there with a short label (aim for 14 characters or fewer: long boards crowd the strip);
-  pull_sign one that is done or turned out wrong. At most 2 planted signs stand at once; they stay for the rest of the turn unless pulled.
-- A hat, chosen with the world in a turn's first scene, fits its place and spirit: wizard (library, night, space, deep reading),
-  miner (cave, digging, searching), straw (beach, desert, meadow), tophat (a proud or festive turn, a finished feature),
-  nightcap (night, long waits), or none. It stays on for the whole turn.
+  pull_sign one that is done or turned out wrong. At most 2 planted signs stand at once; they stay until pulled.
+- A hat, chosen with the world in the session's first scene, fits its place and spirit: wizard (library, night, space, deep reading),
+  miner (cave, digging, searching), straw (beach, desert, meadow), tophat (a proud or festive session), nightcap (night, long waits),
+  or none. It stays on with the world.
 - A "sign" shows its label on a board: use it for file names, commands, or search terms the agent is working on (e.g. "auth.ts", "npm test").
-- Props are toys, not scenery: every scene has at least TWO interactions with its props (look at, carry and drop, squash, type at, dig beside),
+- Props are toys, not scenery: every scene has at least TWO interactions with its props (look at, carry and drop, type at, dig beside),
   ideally a tiny story: find something, react to it, do something about it.
 - Use "read" at most once per scene, and not in two scenes in a row. Prefer carry, drop, type, dig, squash, run and the gestures.
-- The setting is chosen once per turn: the first scene of a turn picks it, every later scene of that turn stays in it.
-  Within a turn, vary the props, moods and actions instead. Follow the variety notes in each request.
+- The setting is chosen once per session: its first scene picks it, every later scene stays in it.
+  Vary the moods, actions and stories instead. Follow the variety notes in each request.
 - Give Claude feelings: pick a scene mood that fits the work, and use at least one emote, action or gesture (wave, shrug, dance) per scene so the strip stays lively. Vary them between scenes.
 - Speech is Claude remarking on REAL findings from the log: concrete, short, a little witty, first person. Never invent facts that are not in the log.
-- Continuity lives in the story: within a turn the place stays, between turns it may well change.`
+- Continuity lives in the story: the place and its props stay the same all session, so new turns can call back to earlier ones.`
 
 export function buildPrompt(args: {
   goal: string | null
@@ -88,7 +87,7 @@ export function buildPrompt(args: {
     args.previous
       ? `Previous scene: setting=${args.previous.setting}, mood=${args.previous.mood}, props=${args.previous.props.map(p => `${p.kind}${p.label ? `(${p.label})` : ''}`).join(', ') || 'none'}`
       : 'This is the first scene.',
-    args.world ? worldAsk(args.world) : 'This is the FIRST scene of a new turn: set up the world (setting and 4 related props).',
+    args.world ? worldAsk(args.world) : 'This is the FIRST scene of the session: set up its world (setting and 4 related props). It stays for the whole session.',
     args.variety ? varietyAsk(args.variety, Boolean(args.interlude)) : '',
     args.finished
       ? 'The agent has just FINISHED its turn. Stage a short wrap-up scene: Claude sums up the outcome in one remark and celebrates or shrugs as fits.'
@@ -103,7 +102,7 @@ export type Variety = { recentSettings: string[]; overused: string[]; suggest: s
 /**
  * Reads the last few scenes for the actions they used most, and the settings of
  * recent turns (`settings`, oldest first; the scenes' own when absent) for a setting to try.
- * `locked` is this turn's setting once its first scene picked one.
+ * `locked` is the session's setting once its first scene picked one.
  */
 export function varietyNotes(
   recent: readonly Scene[],
@@ -126,10 +125,10 @@ export function varietyNotes(
 function varietyAsk(v: Variety, isInterlude: boolean): string {
   const lines = ['Variety notes:']
   if (v.locked) {
-    lines.push(`- the setting is fixed for this turn: "${v.locked}". Stay in it; vary props, mood and actions instead`)
+    lines.push(`- the setting is fixed for this session: "${v.locked}". Stay in it; vary mood, actions and stories instead`)
   } else {
     if (v.recentSettings.length) lines.push(`- settings of recent turns, oldest first: ${v.recentSettings.join(', ')}`)
-    lines.push('- this is the first scene of a new turn: it picks the setting for the whole turn')
+    lines.push('- this is the first scene of the session: it picks the setting for the whole session')
   }
   if (!isInterlude && !v.locked) {
     lines.push(`- suggested setting this time: ${v.suggest} (use it unless it truly cannot fit the work)`)
@@ -141,9 +140,9 @@ function varietyAsk(v: Variety, isInterlude: boolean): string {
 
 function worldAsk(w: NonNullable<Parameters<typeof buildPrompt>[0]['world']>): string {
   const props = w.props.map(p => `${p.id} = ${p.kind}${p.label ? ` "${p.label}"` : ''} at x=${p.x}`).join('; ')
-  return `This turn's world is set (do NOT send "props" or "hat"): setting ${w.setting}; hat ${w.hat ?? 'none'}; props: ${props || 'none left'}` +
+  return `This session's world is set (do NOT send "props" or "hat"): setting ${w.setting}; hat ${w.hat ?? 'none'}; props: ${props || 'none left'}` +
     (w.gone.length ? `; gone: ${w.gone.join(', ')}` : '') +
-    '. Use these ids. To change a prop, have Claude transform it.'
+    '. Use these ids. Keep every prop as it is: no transform, no squash.'
 }
 
 /** What to stage when nothing new has happened for a while but the agent is still at work. */

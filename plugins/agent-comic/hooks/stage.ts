@@ -163,6 +163,8 @@ export class Stage {
   private homeItems: HubItem[] = []
   private leaving: { phase: 'wake' | 'walk' | 'open' | 'in'; at: number; isSprint: boolean } | null = null
   private doorOpenUntil = 0
+  /** A door Claude summoned into the world: he walks through it into new scenery, queued behind it. */
+  private portal: { col: number; phase: 'appear' | 'walk' | 'open' | 'in'; at: number } | null = null
   private newItem: { at: number; item: HubItem } | null = null
   private pennants: number[] = [] // commits: little flags planted in this world, by column
   private homeLabels: { col: number; row: number; text: string; color: number }[] = [] // drawn over the figure
@@ -317,6 +319,50 @@ export class Stage {
     this.isPendingUrgent = true
   }
 
+  /**
+   * Claude changes a prop of the world: he lifts it overhead, a puff, it is the new thing, he sets it down.
+   * A world still waiting to load (he is on his way in) gets the change as its first beat.
+   */
+  changeProp(id: string, into: Prop['kind'], label?: string) {
+    const beat: Beat = { do: 'transform', at: id, into, label }
+    const fresh = [...this.waiting].reverse().find(s => !s.continues)
+    if (fresh) {
+      fresh.beats = [beat, ...fresh.beats]
+      return
+    }
+    this.interject([beat, { do: 'emote', mood: 'happy', secs: 1.5 }])
+  }
+
+  /**
+   * Claude moves the world to new scenery: whatever he was doing, he stops, a door appears beside
+   * him with a puff, he walks through it and steps out into `scene` from the left.
+   * At home (or already on his way through a door) the new world simply waits to load.
+   */
+  changeScenery(scene: Scene) {
+    this.queue({ ...scene, continues: undefined })
+    if (this.isHome || this.isAway || this.leaving || this.portal) return
+    if (this.carrying) this.putDown()
+    this.run = null
+    this.bubble = null
+    this.lift = 0
+    this.bob = 0
+    this.looking = false
+    const ahead = this.facing > 0 ? this.x + CLAUDE_WIDTH + 6 : this.x - DOOR_WIDTH - 6
+    const room = Math.max(0, this.columns - DOOR_WIDTH - 1)
+    const col = ahead >= 1 && ahead <= room ? Math.round(ahead) : clamp(Math.round(this.facing > 0 ? this.x - DOOR_WIDTH - 6 : this.x + CLAUDE_WIDTH + 6), 1, room)
+    this.portal = { col, phase: 'appear', at: this.now }
+    this.facing = col > this.x ? 1 : -1
+    this.emote = { mood: 'surprised', until: this.now + 900 }
+    const ground = this.rows * 2 - 2
+    this.give('poof', col + Math.floor(DOOR_WIDTH / 2) - 1, ground - DOOR.closed.length)
+    for (let k = 0; k < 4; k++) this.give('sparkle', col + Math.round(this.rand() * DOOR_WIDTH))
+  }
+
+  /** True while a summoned door is up or he is going through it. */
+  get isTravelling(): boolean {
+    return this.portal !== null
+  }
+
   /** At home, the room he is in and what he is doing there (`hall:admire`); null away. */
   get homeDoing(): string | null {
     return this.isHome ? `${this.room}:${this.trip ? 'walking' : this.pastime?.kind ?? 'idle'}` : null
@@ -350,7 +396,7 @@ export class Stage {
 
   /** Idle long enough between turns, and not home yet: time to go home. */
   get wantsHome(): boolean {
-    return !this.isHome && !this.leaving && this.idleMs >= DOZE_MS - 1500
+    return !this.isHome && !this.leaving && !this.portal && this.idleMs >= DOZE_MS - 1500
   }
 
   /** Back home through the door: it swings open and he steps out, to nap there soon. */
@@ -461,6 +507,28 @@ export class Stage {
     return this.homeItems.slice(-fit).map((item, i) => ({ item, col: 3 + i * (7 + HUB_GAP) }))
   }
 
+  /** The summoned door: it appears, he walks to it, it opens, he goes in, and the waiting world loads. */
+  private stepPortal() {
+    const p = this.portal!
+    const since = this.now - p.at
+    if (p.phase === 'appear' && since >= 900) this.portal = { ...p, phase: 'walk', at: this.now }
+    else if (p.phase === 'open' && since >= 500) {
+      this.hidden = true
+      this.portal = { ...p, phase: 'in', at: this.now }
+    } else if (p.phase === 'in' && since >= 600) {
+      this.portal = null
+      const next = this.waiting.findIndex(s => !s.continues)
+      if (next < 0) {
+        this.hidden = false
+        return
+      }
+      this.waiting.splice(0, next)
+      // stepping out of a door, like coming from home: in from the left
+      this.isAway = true
+      this.load(this.waiting.shift()!)
+    }
+  }
+
   private stepLeaving(dt: number) {
     const l = this.leaving!
     const next = (phase: 'walk' | 'open' | 'in') => {
@@ -539,6 +607,15 @@ export class Stage {
     }
     if (this.leaving) {
       this.stepLeaving(dt)
+      this.stepHelpers(dt)
+      return
+    }
+    if (this.portal) {
+      this.stepPortal()
+      if (this.portal?.phase === 'walk' && this.walk(this.portal.col + Math.floor((DOOR_WIDTH - CLAUDE_WIDTH) / 2), dt)) {
+        this.facing = 1
+        this.portal = { ...this.portal, phase: 'open', at: now }
+      }
       this.stepHelpers(dt)
       return
     }
@@ -1463,6 +1540,10 @@ export class Stage {
     drawGround(c, look)
     if (this.progress && this.progress.total > 0) drawProgress(c, this.progress)
     if (this.isHome || this.isAway) this.drawHome(c, H - 2)
+    if (this.portal) {
+      const door = this.portal.phase === 'open' || this.portal.phase === 'in' ? DOOR.open : DOOR.closed
+      c.sprite(this.portal.col, H - 2 - door.length, door, DOOR.palette)
+    }
     for (const col of this.pennants) c.sprite(col, H - 2 - PENNANT.rows.length, PENNANT.rows, PENNANT.palette)
 
     // the bubble is laid out before anything is drawn, so a sign board it would cut into is left out
