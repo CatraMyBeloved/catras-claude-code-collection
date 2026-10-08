@@ -140,7 +140,7 @@ export class Stage {
   private isNapping = false // came home after a long idle: he naps soon
   private hidden = false
   private homeItems: HubItem[] = []
-  private leaving: { phase: 'walk' | 'open' | 'in'; at: number } | null = null
+  private leaving: { phase: 'wake' | 'walk' | 'open' | 'in'; at: number; isSprint: boolean } | null = null
   private doorOpenUntil = 0
   private newItem: { at: number; item: HubItem } | null = null
   private pennants: number[] = [] // commits: little flags planted in this world, by column
@@ -330,12 +330,14 @@ export class Stage {
 
   /**
    * A new turn while home: he walks to the door and goes through; the turn's world
-   * loads once he is in. False when he is not home (nothing to do).
+   * loads once he is in. Woken from a nap, he starts up and sprints for it.
+   * False when he is not home (nothing to do).
    */
   leaveHome(): boolean {
     if (!this.isHome || this.leaving) return false
-    this.leaving = { phase: 'walk', at: this.now }
-    this.emote = null
+    const isSprint = this.isDozing
+    this.leaving = { phase: isSprint ? 'wake' : 'walk', at: this.now, isSprint }
+    this.emote = isSprint ? { mood: 'surprised', until: this.now + 700 } : null
     this.wanderTo = null
     return true
   }
@@ -409,14 +411,24 @@ export class Stage {
 
   private stepLeaving(dt: number) {
     const l = this.leaving!
-    if (l.phase === 'walk') {
-      if (this.walk(this.doorSpot(), dt)) {
+    const next = (phase: 'walk' | 'open' | 'in') => {
+      this.leaving = { ...l, phase, at: this.now }
+    }
+    if (l.phase === 'wake') {
+      // a start: a little jump, eyes wide, then off
+      const t = (this.now - l.at) / 1000
+      this.lift = t < 0.35 ? Math.sin((Math.PI * t) / 0.35) * 2 : 0
+      if (t >= 0.6) next('walk')
+    } else if (l.phase === 'walk') {
+      const isThere = this.walk(this.doorSpot(), dt, l.isSprint ? this.pace.walk * 2.4 : this.pace.walk)
+      if (l.isSprint && !isThere && this.rand() < 12 * dt) this.give('dust')
+      if (isThere) {
         this.facing = 1
-        this.leaving = { phase: 'open', at: this.now }
+        next('open')
       }
     } else if (l.phase === 'open' && this.now - l.at >= 500) {
       this.hidden = true
-      this.leaving = { phase: 'in', at: this.now }
+      next('in')
     } else if (l.phase === 'in' && this.now - l.at >= 500) {
       this.leaving = null
       this.isAway = true
@@ -1188,6 +1200,11 @@ export class Stage {
       back = 'up'
       front = 'up'
     }
+    if (this.leaving?.isSprint && this.leaving.phase === 'walk') {
+      // sprinting for the door, arms out like a run
+      back = 'mid'
+      front = 'mid'
+    }
     if (this.calling) {
       // turned to the person, one arm waving
       face = 'ahead'
@@ -1252,7 +1269,7 @@ export class Stage {
     const shake = (this.mood() === 'angry' || this.mood() === 'worried') && Math.floor(now / 90) % 2 === 0 ? 1 : 0
     const art = claude({
       ...pose,
-      walk: this.moving ? Math.floor(now / (beat === 'run' ? 70 : 120)) : 0,
+      walk: this.moving ? Math.floor(now / (beat === 'run' || this.leaving?.isSprint ? 70 : 120)) : 0,
       airborne: this.lift > 1,
       crouch: isSlumped || this.bob > 0 || (isStill && Math.floor(now / breathMs) % 2 === 1),
       left: this.facing < 0,
@@ -1403,7 +1420,7 @@ export class Stage {
       taken.push([row, left, left + width])
       this.homeLabels.push({ col: left, row, text: t.text, color: t.color })
     }
-    const isOpen = this.now < this.doorOpenUntil || (this.leaving !== null && this.leaving.phase !== 'walk')
+    const isOpen = this.now < this.doorOpenUntil || this.leaving?.phase === 'open' || this.leaving?.phase === 'in'
     const door = isOpen ? DOOR.open : DOOR.closed
     c.sprite(this.doorCol(), ground - door.length, door, DOOR.palette)
   }

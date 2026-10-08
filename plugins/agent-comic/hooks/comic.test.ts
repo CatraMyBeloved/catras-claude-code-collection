@@ -987,3 +987,30 @@ test('at home every keepsake keeps its title up, and long neighbouring titles ne
   const text = allText(st)
   for (const title of ['auth bug slain', 'hub world built', 'rare find']) expect(text).toContain(title)
 })
+
+test('woken from a nap at home, he starts up and sprints for the door', async () => {
+  const leaveFrom = (isAsleep: boolean) => {
+    const st = new Stage(() => 0.5)
+    st.frame(90, 10)
+    st.setHome([])
+    let t = 1_000_000
+    if (isAsleep) {
+      st.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'wait', secs: 0.3 }] }))
+      st.step(t)
+      st.goHome() // back home after a long idle: he naps 15 s later
+      for (const end = t + 17_000; t < end; t += 100) st.step(t)
+    } else {
+      st.startHome()
+      st.step(t)
+    }
+    ;(st as unknown as { x: number }).x = 4 // both start from the far side of the hub
+    st.leaveHome()
+    st.queue(sceneOf({ setting: 'forest', props: [], beats: [{ do: 'wait', secs: 1 }] }))
+    const start = t
+    while (st.home && t < start + 30_000) st.step((t += 50))
+    return t - start
+  }
+  const walked = leaveFrom(false)
+  const sprinted = leaveFrom(true)
+  expect(sprinted).toBeLessThan(walked * 0.7)
+})

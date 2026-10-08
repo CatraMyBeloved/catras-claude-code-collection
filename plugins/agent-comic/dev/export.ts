@@ -91,6 +91,16 @@ const features: Record<string, Feature> = {
   'door-home': { shows: 'a long idle between turns: back home through the door, and a nap soon after', ms: 19000, columns: 90,
     setup: s => { s.setHome(KEEPSAKES); s.queue(world) },
     at: [[1500, s => s.goHome()]] },
+  'door-sprint': { shows: 'a new turn while he naps at home: he starts awake and sprints for the door', ms: 6000, columns: 90,
+    setup: s => {
+      // home 30 s before the clip starts, asleep by then; he dozed off on the far side
+      s.setHome(KEEPSAKES)
+      s.step(970_000)
+      s.goHome()
+      for (let t = 970_000; t < 1_000_000; t += 100) s.step(t)
+      ;(s as unknown as { x: number }).x = 4
+    },
+    at: [[800, s => { s.leaveHome(); s.queue(world) }]] },
   'needs-you': { shows: 'a permission prompt or a question: he stops, turns to you and waves', ms: 6000, columns: 70,
     setup: s => s.queue(working),
     at: [[1500, s => { s.attention = 'permission' }], [4500, s => { s.attention = null }]] },
