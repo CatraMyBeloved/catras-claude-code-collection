@@ -695,6 +695,7 @@ async function directorSession($: Engine, on: On, answer: (prompt: string, n: nu
     return { text: e.text }
   })
   on('turn.complete', async (_$, e) => ({ text: e.answer }))
+  on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
   on('model.complete', async (_$, e) => {
     asks.push(String(e.prompt))
     systems.push(e.systemBlocks)
@@ -1032,12 +1033,14 @@ test('a pat on the heart beside the band sends a headpat as the person, and the 
   const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
   await mounted.press({ key: 'pet' })
   await mounted.unmount()
+  await s.clock.settle() // sent once the press has returned
   expect(s.prompts.length).toBe(1)
   expect(s.prompts[0]!.text.toLowerCase()).toContain('pat')
   expect(s.prompts[0]!.origin).toMatchObject({ kind: 'plugin', name: 'agent-comic' })
   // Claude answers the pat: no world is set up for it, and no wrap-up after
+  await $.turn.start({ text: s.prompts[0]!.text, turnId: 'pet' } as unknown as Parameters<Engine['turn']['start']>[0])
   await s.clock.advance(3000)
-  await s.done()
+  await s.done({ turnId: 'pet' })
   await s.clock.advance(3000)
   expect(s.asks.length).toBe(0)
 })
@@ -1086,4 +1089,13 @@ test('whatever he is doing at home, a new turn has him drop it and sprint for th
     while (st.home && t < start + 20_000) st.step((t += 50))
     expect(t - start).toBeLessThan(6000)
   }
+})
+
+test('/comic-pet sends the headpat too, after the command has answered', async ($, on) => {
+  const s = await directorSession($, on, () => sceneIn('meadow'))
+  const out = await $.command.run({ command: 'comic-pet', args: '' } as unknown as Parameters<Engine['command']['run']>[0])
+  expect(JSON.stringify(out)).toContain('headpat')
+  await s.clock.settle()
+  expect(s.prompts.length).toBe(1)
+  expect(s.prompts[0]!.origin).toMatchObject({ kind: 'plugin', name: 'agent-comic' })
 })

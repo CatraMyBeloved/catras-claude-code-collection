@@ -43,6 +43,7 @@ const PET_LINES = [
 ]
 let lastPetLine = -1
 let isPetTurn = false // Claude is answering a pat: the comic stays as it is
+let pendingPats: string[] = [] // headpats sent, their turns not begun yet
 const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
 const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
 const WEATHER_MS = 180_000 // failures this recent cloud the sky
@@ -300,6 +301,17 @@ function observe(e: Record<string, unknown>, ran: { isError?: boolean; deny?: st
   if (failed) fail()
 }
 
+/**
+ * A pat: hearts at once, and the headpat sent as the person's message. Sent from a timer, once the
+ * hook that asked has returned: a prompt made inside a command would wait on the turn the command holds.
+ */
+function pat($: EngineInterface) {
+  stage.pet()
+  const text = petLine()
+  pendingPats.push(text)
+  $.clock.after(0, () => $.prompt.submit({ text, asUser: true }).catch(() => undefined))
+}
+
 /** A pat's message, never the same one twice running. */
 function petLine(): string {
   let i = Math.floor(Math.random() * PET_LINES.length)
@@ -443,14 +455,12 @@ ${formatTimings(timings, latencyMs, answered)}` }
 
   // a pat: the ♥ at the band's edge, or /comic-pet
   on('ui.press', { element: PET_KEY }, async $ => {
-    stage.pet()
-    await $.prompt.submit({ text: petLine(), asUser: true })
+    pat($)
     return { element: PET_KEY }
   })
 
   on('command.run', { command: 'comic-pet' }, async $ => {
-    stage.pet()
-    await $.prompt.submit({ text: petLine(), asUser: true })
+    pat($)
     return { text: 'A headpat, on its way.' }
   })
 
@@ -463,12 +473,9 @@ ${formatTimings(timings, latencyMs, answered)}` }
   })
 
   on('prompt.submit', async ($, e, next) => {
-    // a pat from the heart: he stays where he is, glowing, while Claude answers it; no world, no scenes
+    // our own headpat (should a hook of ours see it): its turn is told apart as it starts, below
     const origin = e.origin as { kind?: string; name?: string } | undefined
-    if (origin?.kind === 'plugin' && origin.name === 'agent-comic') {
-      isPetTurn = true
-      return next(e)
-    }
+    if (origin?.kind === 'plugin' && origin.name === 'agent-comic') return next(e)
     linger?.cancel()
     // typed over the running turn, or delivered into it: the same story goes on
     if (e.turnId !== undefined) {
@@ -577,6 +584,16 @@ ${formatTimings(timings, latencyMs, answered)}` }
       }
     }
     return stored
+  })
+
+  // the turn answering a pat: he stays where he is, glowing, while Claude answers; no world, no scenes
+  on('turn.start', async ($, e, next) => {
+    const i = pendingPats.indexOf(e.text)
+    if (i >= 0) {
+      pendingPats.splice(i, 1)
+      isPetTurn = true
+    }
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
