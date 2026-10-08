@@ -8,9 +8,13 @@
     {
       "name": "agent-comic",
       "source": "./plugins/agent-comic",
-      "description": "A little comic above the prompt: Sonnet turns what the main agent is doing into animated pixel scenes",
+      "description": "A pixel comic above the prompt: Claude acts out what the agent is doing, from a home hub with keepsakes he collects; hybrid or token-free scenes",
       "category": "mods",
-      "tags": ["mod", "ui", "fun"]
+      "tags": [
+        "mod",
+        "ui",
+        "fun"
+      ]
     }
   ]
 }

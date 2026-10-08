@@ -8,6 +8,7 @@ import { parseScene } from '../hooks/scene'
 import type { Scene } from '../hooks/scene'
 import { MOOD_SHOWS } from '../hooks/demo'
 import { Stage } from '../hooks/stage'
+import type { HubItem } from '../hooks/hub'
 
 const out = process.argv[2] ?? 'dev/out/export'
 
@@ -66,8 +67,65 @@ action('hat-nightcap', 'nightcap: night, long waits, and dozing between turns', 
 action('say', 'speech bubble', 3500, { props: [], beats: [{ do: 'walk', to: 15 }, { do: 'say', text: 'Found it: the fit keeps re-reading its whole history.', secs: 4 }] })
 action('think', 'thought bubble', 3000, { props: [], beats: [{ do: 'walk', to: 15 }, { do: 'think', text: 'Hmm, is that a race condition?', secs: 4 }] })
 
+// the stage's own features, driven as the hooks drive them: each a setup and a few timed calls
+type Feature = { shows: string; ms: number; columns: number; setup: (s: Stage) => void; at?: [number, (s: Stage) => void][] }
+const KEEPSAKES: HubItem[] = [
+  { kind: 'trophy', label: 'auth bug slain', at: 1 }, { kind: 'plant', label: 'tests green', at: 2 },
+  { kind: 'banner', label: 'v2 shipped', at: 3 }, { kind: 'gem', label: 'rare find', at: 4 },
+  { kind: 'lantern', label: 'aha', at: 5 },
+]
+const world = scene({
+  setting: 'meadow', props: [{ id: 'c', kind: 'computer', x: 55 }, { id: 't', kind: 'tree', x: 85 }],
+  beats: [{ do: 'walk', to: 30 }, { do: 'type', at: 'c', secs: 3 }, { do: 'wait', secs: 2 }],
+})
+const working = scene({ setting: 'meadow', props: [{ id: 'c', kind: 'computer', x: 60 }], beats: [{ do: 'walk', to: 30 }, { do: 'type', at: 'c', secs: 6 }] })
+const features: Record<string, Feature> = {
+  'hub-start': { shows: 'the session opens at home: keepsakes from earlier sessions, labels as he strolls by', ms: 9000, columns: 90,
+    setup: s => { s.setHome(KEEPSAKES); s.startHome() } },
+  'hub-new-keepsake': { shows: 'Claude adds a keepsake with the hub tool: it pops in, labelled', ms: 4000, columns: 90,
+    setup: s => { s.setHome(KEEPSAKES.slice(0, 3)); s.startHome() },
+    at: [[800, s => s.addHomeItem({ kind: 'medal', label: 'parser rewrite', at: 9 })]] },
+  'door-out': { shows: 'a new turn: he walks to the door, goes through, and steps into the world of the turn', ms: 11000, columns: 90,
+    setup: s => { s.setHome(KEEPSAKES); s.startHome() },
+    at: [[600, s => { s.leaveHome(); s.queue(world) }]] },
+  'door-home': { shows: 'a long idle between turns: back home through the door, and a nap soon after', ms: 19000, columns: 90,
+    setup: s => { s.setHome(KEEPSAKES); s.queue(world) },
+    at: [[1500, s => s.goHome()]] },
+  'needs-you': { shows: 'a permission prompt or a question: he stops, turns to you and waves', ms: 6000, columns: 70,
+    setup: s => s.queue(working),
+    at: [[1500, s => { s.attention = 'permission' }], [4500, s => { s.attention = null }]] },
+  'progress': { shows: 'the task list as a trail along the ground, the flag gold once all are done', ms: 6000, columns: 70,
+    setup: s => { s.queue(working); s.progress = { done: 0, total: 4 } },
+    at: [[1000, s => { s.progress = { done: 1, total: 4 } }], [2500, s => { s.progress = { done: 3, total: 4 } }], [4000, s => { s.progress = { done: 4, total: 4 } }]] },
+  'git': { shows: 'git commit plants a little flag; git push lets a balloon go', ms: 6000, columns: 70,
+    setup: s => s.queue(scene({ setting: 'beach', props: [], beats: [{ do: 'walk', to: 45 }, { do: 'wait', secs: 4 }] })),
+    at: [[1500, s => s.gitMoment('commit')], [3000, s => s.gitMoment('push')]] },
+  'weather-rain': { shows: 'several failures lately: rain clouds drift over (outdoor settings only)', ms: 4000, columns: 70,
+    setup: s => { s.queue(working); s.ambience = { hour: 13, weather: 'rain' } } },
+  'weather-cloudy': { shows: 'a failure lately: a cloud drifts over', ms: 4000, columns: 70,
+    setup: s => { s.queue(working); s.ambience = { hour: 13, weather: 'cloudy' } } },
+  'night': { shows: 'the local hour: after 21:00 a moon instead of the sun', ms: 3000, columns: 70,
+    setup: s => { s.queue(working); s.ambience = { hour: 23, weather: 'clear' } } },
+  'dusk': { shows: 'the local hour: at dawn and dusk the sun sits low', ms: 3000, columns: 70,
+    setup: s => { s.queue(working); s.ambience = { hour: 19, weather: 'clear' } } },
+}
+
 const ROWS = 10
 const result: Record<string, { kind: string; shows: string; columns: number; rows: number; frames: string[]; x: number[] }> = {}
+for (const [name, f] of Object.entries(features)) {
+  const stage = new Stage(seeded(11))
+  stage.frame(f.columns, ROWS)
+  f.setup(stage)
+  const frames: string[] = []
+  const x: number[] = []
+  for (let t = 0; t <= f.ms; t += 50) {
+    for (const [when, act] of f.at ?? []) if (when === t) act(stage)
+    stage.step(1_000_000 + t)
+    frames.push(stage.frame(f.columns, ROWS))
+    x.push(stage.figureColumn)
+  }
+  result[name] = { kind: 'feature', shows: f.shows, columns: f.columns, rows: ROWS, frames, x }
+}
 for (const [name, clip] of Object.entries(clips)) {
   const stage = new Stage(seeded(11))
   stage.frame(clip.columns, ROWS) // size the stage first, so walk targets are in this clip's columns

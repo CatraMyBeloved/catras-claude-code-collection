@@ -695,11 +695,16 @@ async function directorSession($: Engine, on: On, answer: (prompt: string, n: nu
     return { value: await answer(String(e.prompt), asks.length) }
   })
   on('ui.log', async () => ({ value: undefined }))
+  const tools: string[] = []
+  on('tool.register', async (_$, e) => {
+    tools.push(e.name)
+    return { value: { tool: `mcp__agent-comic__${e.name}` } }
+  })
   await $.session.start({ cwd: 'C:/work', surface: 'terminal', isInteractive: true })
   const turn = (text: string, extra: object = {}) => $.prompt.submit({ text, ...extra } as Parameters<Engine['prompt']['submit']>[0])
   const done = (extra: object = {}) =>
     $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer', ...extra } as Parameters<Engine['turn']['complete']>[0])
-  return { clock, asks, systems, turn, done }
+  return { clock, asks, systems, tools, turn, done }
 }
 
 test('an answer for an old turn never sets up the new one, and does not hold it up', async ($, on) => {
@@ -747,19 +752,27 @@ test('a prompt typed over the running turn carries the story on in the same worl
   expect(wrap).toContain('write the docs') // the goal stays the first prompt's
 })
 
-test('a failed wrap-up is asked again after a short back-off', async ($, on) => {
+test('a failed wrap-up falls back to a canned one, and the model rests a while', async ($, on) => {
   const s = await directorSession($, on, (_p, n) =>
-    n === 2 ? ({ isAnswered: false, reason: 'timeout' } as unknown as ModelCompleteResult) : sceneIn('night'))
+    n === 2 ? ({ isAnswered: false, reason: 'aborted' } as unknown as ModelCompleteResult) : sceneIn('night'))
   await s.turn('ship it')
   await s.clock.advance(1000)
   await s.done()
   await s.clock.advance(1000)
-  expect(s.asks.length).toBe(2) // the wrap, which fails
-  const until = Date.now() + 2100 // the back-off runs on wall time
-  while (Date.now() < until) { /* wait it out */ }
+  expect(s.asks.length).toBe(2) // the wrap, which fails: a canned wrap-up plays instead
+  await s.turn('one more thing')
   await s.clock.advance(1000)
-  expect(s.asks.length).toBe(3)
-  expect(s.asks[2]).toContain('FINISHED')
+  expect(s.asks.length).toBe(3) // a new turn is a fresh start for the model
+})
+
+test('with the director off, a whole turn plays without a single model call', { options: { director: 'off' } }, async ($, on) => {
+  const s = await directorSession($, on, () => sceneIn('meadow'))
+  expect(s.tools).toEqual(['hub_add'])
+  await s.turn('refactor the parser')
+  await s.clock.advance(3000)
+  await s.done()
+  await s.clock.advance(3000)
+  expect(s.asks.length).toBe(0)
 })
 
 test('a new turn and its end are asked about at once, with the fixed instructions cached', async ($, on) => {
@@ -772,4 +785,168 @@ test('a new turn and its end are asked about at once, with the fixed instruction
   await s.clock.settle()
   expect(s.asks.length).toBe(2)
   expect(s.asks[1]).toContain('FINISHED')
+})
+
+// ---- the hub, the door, and what the stage tells the person ----
+
+/** A frame's cells back as text rows and colours, to look at what the band shows. */
+function cells(encoded: string, columns: number) {
+  const bin = atob(encoded)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  const u = new Uint32Array(bytes.buffer)
+  const rows: { text: string; fg: number[]; bg: number[] }[] = []
+  for (let o = 0; o < u.length; o += columns * 3) {
+    let text = ''
+    const fg: number[] = []
+    const bg: number[] = []
+    for (let c = 0; c < columns; c++) {
+      text += String.fromCodePoint(u[o + c * 3]!)
+      fg.push(u[o + c * 3 + 1]!)
+      bg.push(u[o + c * 3 + 2]!)
+    }
+    rows.push({ text, fg, bg })
+  }
+  return rows
+}
+const shown = (stage: Stage, columns = 90, rows = 10) => cells(stage.frame(columns, rows), columns)
+const allText = (stage: Stage) => shown(stage).map(r => r.text).join('\n')
+
+test('the session opens at home; a new turn walks him through the door into the world of the turn', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.setHome([{ kind: 'trophy', label: 'bug slain', at: 1 }])
+  st.startHome()
+  expect(st.home).toBe(true)
+  expect(st.leaveHome()).toBe(true)
+  st.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'wait', secs: 1 }] }))
+  let t = 1_000_000
+  for (const end = t + 1500; t < end; t += 50) st.step(t)
+  expect(st.home).toBe(true) // still on his way to the door: the world of the turn waits for him
+  for (const end = t + 15_000; t < end; t += 50) {
+    st.step(t)
+    st.frame(90, 10)
+  }
+  expect(st.home).toBe(false)
+  expect(st.world().setting).toBe('cave')
+  // a long idle between turns, and he goes home again
+  for (const end = t + 125_000; t < end; t += 200) st.step(t)
+  expect(st.wantsHome).toBe(true)
+  st.goHome()
+  expect(st.home).toBe(true)
+})
+
+test('at home a new keepsake pops in with its label up', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.setHome([])
+  st.startHome()
+  st.step(1_000_000)
+  st.addHomeItem({ kind: 'gem', label: 'rare find', at: 2 })
+  st.step(1_000_050)
+  expect(allText(st)).toContain('rare find')
+})
+
+test('needing the person: he turns to them with a call out, and the scene waits for the answer', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.queue(sceneOf({ setting: 'meadow', props: [], beats: [{ do: 'wait', secs: 4 }, { do: 'wave' }] }))
+  let t = 1_000_000
+  for (const end = t + 1000; t < end; t += 50) st.step(t)
+  const before = st.remainingMs
+  st.attention = 'permission'
+  for (const end = t + 20_000; t < end; t += 50) st.step(t)
+  expect(allText(st)).toContain('Needs your OK')
+  st.attention = null
+  st.step(t)
+  expect(Math.abs(st.remainingMs - before)).toBeLessThan(200) // carried on where it was, not 20 s on
+  expect(allText(st)).not.toContain('Needs your OK')
+})
+
+test('the task trail lights up along the ground as tasks are done', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.step(1_000_000)
+  const amber = 0xfeae34
+  st.progress = { done: 1, total: 4 }
+  const quarter = shown(st)[9]!.bg.filter(c => c === amber).length
+  st.progress = { done: 3, total: 4 }
+  const most = shown(st)[9]!.bg.filter(c => c === amber).length
+  expect(quarter).toBeGreaterThan(10)
+  expect(most).toBeGreaterThan(quarter * 2)
+})
+
+test('the sky keeps the hour and the weather, out of doors only', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.queue(sceneOf({ setting: 'meadow', props: [], beats: [{ do: 'wait', secs: 1 }] }))
+  st.step(1_000_000)
+  const sky = (s: Stage) => shown(s).slice(0, 4).flatMap(r => [...r.fg, ...r.bg])
+  const sun = 0xfee761
+  const rain = 0x0099db
+  st.ambience = { hour: 13, weather: 'clear' }
+  expect(sky(st)).toContain(sun)
+  st.ambience = { hour: 23, weather: 'clear' }
+  expect(sky(st)).not.toContain(sun) // a moon instead
+  st.ambience = { hour: 13, weather: 'rain' }
+  let hasRain = false
+  for (let t = 1_000_000; t < 1_004_000 && !hasRain; t += 100) {
+    st.step(t)
+    hasRain = shown(st).some(r => r.fg.includes(rain) || r.bg.includes(rain))
+  }
+  expect(hasRain).toBe(true)
+  const cave = new Stage(() => 0.5)
+  cave.frame(90, 10)
+  cave.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'wait', secs: 1 }] }))
+  cave.step(1_000_000)
+  cave.ambience = { hour: 13, weather: 'rain' }
+  const caveRain = [0, 300, 600, 900].some(dt => {
+    cave.step(1_000_000 + dt)
+    return shown(cave).slice(0, 3).some(r => r.fg.includes(rain) || r.bg.includes(rain))
+  })
+  expect(caveRain).toBe(false)
+})
+
+test('a commit plants a little flag, a push lets a balloon go', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'walk', to: 50 }] }))
+  play(st, 1_000_000, 8000)
+  const gold = (s: Stage) => shown(s).flatMap(r => [...r.fg, ...r.bg]).filter(c => c === 0xfee761).length
+  const before = gold(st)
+  st.gitMoment('commit')
+  expect(gold(st)).toBeGreaterThan(before)
+  expect(() => {
+    st.gitMoment('push')
+    play(st, 1_008_000, 5000)
+  }).not.toThrow()
+})
+
+test('Claude keeps a milestone in the hub with the comic tool, a couple per session at most', async ($, on) => {
+  await directorSession($, on, () => sceneIn('meadow'))
+  const call = async (input: object) => {
+    const r = await $.tool.call({ tool: 'mcp__agent-comic__hub_add', ...input } as unknown as Parameters<Engine['tool']['call']>[0])
+    return String((r as { result?: unknown }).result)
+  }
+  expect(await call({ kind: 'trophy', label: 'auth bug slain ✅' })).toContain('"auth bug slain"')
+  expect(await call({ kind: 'spaceship', label: 'to the moon' })).toContain('Not added')
+  await call({ kind: 'gem', label: 'second' })
+  expect(await call({ kind: 'plant', label: 'third' })).toContain('already')
+  const list = await $.command.run({ command: 'comic-hub', args: '' } as unknown as Parameters<Engine['command']['run']>[0])
+  expect(JSON.stringify(list)).toContain('trophy: auth bug slain')
+})
+
+test('a permission prompt puts the call out on the band', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { key: 'engine' }, 'engine') as RenderElement
+  })
+  on('tool.check', async () => ({ decision: 'ask' }))
+  await directorSession($, on, () => sceneIn('meadow'))
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' } } as unknown as Parameters<Engine['tool']['check']>[0])
+  const mounted = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(true) })
+  const raster = (await mounted.find({ key: 'stage' })) as unknown as { props: { cells: string; columns: number } }
+  const text = cells(raster.props.cells, raster.props.columns).map(r => r.text).join('\n')
+  expect(text).toContain('Needs your OK')
+  await mounted.unmount()
 })

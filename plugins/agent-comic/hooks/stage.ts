@@ -4,15 +4,31 @@ import { Canvas, cellText } from './canvas'
 import type { Beat, Hat, Mood, Prop, Scene } from './scene'
 import { BALLOON, BITS, HATS_ART, MINI_HEIGHT, MINI_WIDTH, miniClaude, CLAUDE_HEIGHT, MOOD_ICONS, CLAUDE_WIDTH, FLAG_WAVE, LOOKS, ORANGE, P, PROPS, SKY_ART, TINTS, bookColor, claude } from './sprites'
 import type { Arm, Face, Look, Tint } from './sprites'
+import type { HubItem } from './hub'
+import { CLOUD, DOOR, HUB_ART, HUB_LOOK, RAIN, RAIN_CLOUD } from './hubart'
 
 const MAX_HELPERS = 3 // small Claudes (subagents) on screen at once
-const DOZE_MS = 120_000 // idle this long and Claude falls asleep
+const DOZE_MS = 120_000 // idle this long and Claude falls asleep (or, between turns, goes home)
+const HOME_DOZE_MS = 15_000 // back home, he naps soon
+const DOOR_WIDTH = DOOR.closed[0]!.length
+const HUB_GAP = 5 // columns between two keepsakes
 const MAX_SCENE_MS = 30_000
 const CUT_AFTER = 3 // beats a scene plays before news may end it at its next pause
 const MAX_PLANTED_SIGNS = 2 // a scene this old gives way to a waiting one mid-play
 const BUBBLE = { fg: P.sand, bg: P.wine, border: ORANGE }
 const THOUGHT = { fg: P.silver, bg: P.night, border: P.mist }
 const SIGN = { fg: P.white, bg: P.bark, border: P.tan }
+const CALL = { fg: P.ink, bg: P.yellow, border: P.amber } // "needs you": the one loud thing on the stage
+const PENNANT = { rows: ['phh', 'pyy', 'p..', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
+const GOAL_FLAG = { rows: ['phh', 'prr', 'p..', 'p..'], palette: { p: P.silver, h: P.coral, r: P.red } }
+const GOAL_FLAG_DONE = { rows: ['phh', 'pyy', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
+const BALLOON_UP = { rows: ['.r.', 'rhr', 'rrr', '.r.', '.s.', 's..'], palette: { r: P.red, h: P.coral, s: P.silver } }
+
+/** The session's sky, kept quiet: the local hour, and weather that follows how the work goes. */
+export type Weather = 'clear' | 'cloudy' | 'rain'
+export type Ambience = { hour: number; weather: Weather }
+/** Why Claude needs the person: a permission prompt, or a question put to them. */
+export type Attention = 'permission' | 'question'
 
 /** How each mood shows: the face it wears, its tint, and what it gives off per second. */
 const MOOD_LOOK: Record<Mood, { face: Face; tint: Tint; effect?: Effect['kind']; rate?: number }> = {
@@ -60,7 +76,7 @@ type Particle = { x: number; y: number; vx: number; vy: number; until: number; c
 
 type Effect =
   | { kind: 'sparkle'; x: number; y: number; color: number; start: number; until: number }
-  | { kind: 'poof' | 'heart' | 'tear' | 'steam' | 'sweat' | 'zzz' | 'dust'; x: number; y: number; start: number; until: number }
+  | { kind: 'poof' | 'heart' | 'tear' | 'steam' | 'sweat' | 'zzz' | 'dust' | 'balloon'; x: number; y: number; start: number; until: number }
 
 const EMPTY: Scene = { setting: 'meadow', mood: 'neutral', props: [], beats: [] }
 
@@ -112,6 +128,26 @@ export class Stage {
 
   /** Set while Sonnet is drawing the next scene: a thought bubble of dots. */
   pondering = false
+
+  /** The hour and the weather the sky shows (outdoor settings only, and only a little). */
+  ambience: Ambience = { hour: 12, weather: 'clear' }
+  /** The agent's task list: a trail along the ground, lit as tasks are done. */
+  progress: { done: number; total: number } | null = null
+
+  // home: the hub, its keepsakes and the door to the turn's world
+  private isHome = false
+  private isAway = false // through the door, the turn's world not yet loaded
+  private isNapping = false // came home after a long idle: he naps soon
+  private hidden = false
+  private homeItems: HubItem[] = []
+  private leaving: { phase: 'walk' | 'open' | 'in'; at: number } | null = null
+  private doorOpenUntil = 0
+  private newItem: { at: number; item: HubItem } | null = null
+  private pennants: number[] = [] // commits: little flags planted in this world, by column
+  private homeLabels: { col: number; row: number; text: string; color: number }[] = [] // drawn over the figure
+
+  private calling: Attention | null = null
+  private callingSince = 0
 
   /** Called as a queued scene begins to play. */
   onPlay: ((scene: Scene) => void) | null = null
@@ -252,6 +288,141 @@ export class Stage {
     this.isPendingUrgent = true
   }
 
+  /** True at home: the hub, before the first turn or after a long idle. */
+  get home(): boolean {
+    return this.isHome
+  }
+
+  /** The keepsakes on show at home, oldest first. */
+  setHome(items: readonly HubItem[]) {
+    this.homeItems = [...items]
+  }
+
+  /** A new keepsake: if Claude is home it pops in with a sparkle, its label up for a while. */
+  addHomeItem(item: HubItem) {
+    this.homeItems = [...this.homeItems, item]
+    if (!this.isHome) return
+    this.newItem = { at: this.now, item }
+    const spot = this.homeSpots().find(h => h.item === item)
+    for (let k = 0; k < 5; k++) this.give('sparkle', spot ? spot.col + 3 + Math.round(this.rand() * 4 - 2) : undefined)
+  }
+
+  /** The session opens at home, Claude standing by. */
+  startHome() {
+    this.settleHome()
+    this.x = clamp(this.doorCol() - CLAUDE_WIDTH - 2, 0, this.maxX())
+  }
+
+  /** Idle long enough between turns, and not home yet: time to go home. */
+  get wantsHome(): boolean {
+    return !this.isHome && !this.leaving && this.idleMs >= DOZE_MS - 1500
+  }
+
+  /** Back home through the door: it swings open and he steps out, to nap there soon. */
+  goHome() {
+    if (this.isHome || this.leaving) return
+    this.settleHome()
+    this.x = this.doorSpot()
+    this.facing = -1
+    this.doorOpenUntil = this.now + 900
+    this.isNapping = true
+  }
+
+  /**
+   * A new turn while home: he walks to the door and goes through; the turn's world
+   * loads once he is in. False when he is not home (nothing to do).
+   */
+  leaveHome(): boolean {
+    if (!this.isHome || this.leaving) return false
+    this.leaving = { phase: 'walk', at: this.now }
+    this.emote = null
+    this.wanderTo = null
+    return true
+  }
+
+  /** Why the person is needed now, if they are: Claude stops, turns to them and waves. */
+  get attention(): Attention | null {
+    return this.calling
+  }
+
+  set attention(why: Attention | null) {
+    if (why && !this.calling) this.callingSince = this.now
+    if (!why && this.calling) {
+      // the scene stood still while he waited: it carries on where it was
+      const d = Math.max(0, this.now - this.callingSince)
+      if (this.run) {
+        this.run.start += d
+        this.run.phaseAt += d
+      }
+      this.restUntil += d
+      this.sceneStart += d
+      if (this.bubble) this.bubble.until += d
+    }
+    this.calling = why
+  }
+
+  /** A commit plants a little flag beside him; a push sends a balloon up. */
+  gitMoment(kind: 'commit' | 'push') {
+    if (kind === 'push') {
+      this.give('balloon')
+      return
+    }
+    const col = this.facing > 0 ? this.x - 4 : this.x + CLAUDE_WIDTH + 1
+    this.pennants = [...this.pennants, clamp(Math.round(col), 0, Math.max(0, this.columns - 3))].slice(-3)
+    this.give('sparkle')
+    this.give('sparkle')
+  }
+
+  private settleHome() {
+    // whatever he was doing in the old world stays there
+    this.run = null
+    this.bubble = null
+    this.emote = null
+    this.lift = 0
+    this.bob = 0
+    this.looking = false
+    this.waiting = []
+    this.load({ setting: 'meadow', mood: 'neutral', props: [], beats: [] })
+    this.isHome = true
+    this.isAway = false
+    this.hidden = false
+    this.leaving = null
+    this.isNapping = false
+    this.idleSince = null // idle from the next step, on its clock
+  }
+
+  /** Where he stands to go through the door, or after stepping out of it. */
+  private doorSpot() {
+    return clamp(this.doorCol() + Math.floor((DOOR_WIDTH - CLAUDE_WIDTH) / 2), 0, this.maxX())
+  }
+
+  private doorCol() {
+    return clamp(Math.round(this.columns * 0.8) - DOOR_WIDTH, 0, Math.max(0, this.columns - DOOR_WIDTH - 1))
+  }
+
+  /** The keepsakes that fit left of the door, newest kept, laid out oldest first. */
+  private homeSpots(): { item: HubItem; col: number }[] {
+    const fit = Math.max(0, Math.floor((this.doorCol() - 6) / (7 + HUB_GAP)))
+    if (fit === 0) return []
+    return this.homeItems.slice(-fit).map((item, i) => ({ item, col: 3 + i * (7 + HUB_GAP) }))
+  }
+
+  private stepLeaving(dt: number) {
+    const l = this.leaving!
+    if (l.phase === 'walk') {
+      if (this.walk(this.doorSpot(), dt)) {
+        this.facing = 1
+        this.leaving = { phase: 'open', at: this.now }
+      }
+    } else if (l.phase === 'open' && this.now - l.at >= 500) {
+      this.hidden = true
+      this.leaving = { phase: 'in', at: this.now }
+    } else if (l.phase === 'in' && this.now - l.at >= 500) {
+      this.leaving = null
+      this.isAway = true
+    }
+  }
+
   /**
    * The turn's world as the next scene will find it: the props of the newest queued
    * world-setting scene, else the current props with their moves, changes and losses.
@@ -268,8 +439,12 @@ export class Stage {
 
   private mood(): Mood {
     // long idle (no scene for a while, e.g. between turns): he dozes off until the next scene
-    if (!this.emote && !this.run && this.idleMs >= DOZE_MS) return 'sleepy'
+    if (this.isDozing) return 'sleepy'
     return this.emote?.mood ?? this.scene.mood
+  }
+
+  private get isDozing(): boolean {
+    return !this.emote && !this.run && !this.leaving && !this.calling && this.idleMs >= (this.isHome && this.isNapping ? HOME_DOZE_MS : DOZE_MS)
   }
 
   /** Advances the animation to `now` (ms). */
@@ -291,6 +466,18 @@ export class Stage {
     if (this.cueMark && this.cueMark.until < now) this.cueMark = null
     if (this.emote && this.emote.until < now) this.emote = null
     if (this.balloon && this.balloon.until < now) this.balloon = null
+    if (this.newItem && now - this.newItem.at > 6000) this.newItem = null
+
+    // waiting on the person: he holds still (the scene with him) until they have answered
+    if (this.calling) {
+      this.stepHelpers(dt)
+      return
+    }
+    if (this.leaving) {
+      this.stepLeaving(dt)
+      this.stepHelpers(dt)
+      return
+    }
 
     if (this.run && this.isDone(this.run)) {
       // a breath between actions: longer after handling things or finding something
@@ -331,6 +518,16 @@ export class Stage {
       scene = { ...scene, setting: this.scene.setting, props: this.scene.props, hat: this.scene.hat }
     } else {
       scene = { ...scene, props: scene.props.map(p => ({ ...p })) }
+      if (this.isHome || this.isAway) {
+        // out of the door and into the turn's world, stepping in from the left
+        this.isHome = false
+        this.isAway = false
+        this.hidden = false
+        this.x = 2
+        this.facing = 1
+        this.give('dust', 3, this.rows * 2 - 3)
+      }
+      this.pennants = []
       this.removed.clear()
       this.placed.clear()
       this.planted.clear()
@@ -618,7 +815,12 @@ export class Stage {
       if (this.walk(this.wanderTo, dt * 0.5)) this.wanderTo = null
     } else if (this.now > this.wanderAt) {
       this.wanderAt = this.now + 3000 + this.rand() * 4000
-      if (this.rand() < 0.6) this.wanderTo = clamp(this.x + (this.rand() * 16 - 8), 0, this.maxX())
+      const spots = this.isHome ? this.homeSpots() : []
+      if (spots.length && this.rand() < 0.7) {
+        // at home he strolls over to look at one of his keepsakes
+        const s = spots[Math.floor(this.rand() * spots.length)]!
+        this.wanderTo = clamp(s.col + 3 - Math.floor(CLAUDE_WIDTH / 2) + (this.rand() < 0.5 ? -9 : 9), 0, this.maxX())
+      } else if (this.rand() < 0.6) this.wanderTo = clamp(this.x + (this.rand() * 16 - 8), 0, this.maxX())
     }
   }
 
@@ -697,6 +899,11 @@ export class Stage {
       case 'poof':
         this.effects.push({ kind, x: x ?? Math.round(mid), y: y ?? head, start: now, until: now + 600 })
         return
+      case 'balloon': {
+        const hand = this.facing > 0 ? this.x + CLAUDE_WIDTH - 1 : this.x - 2
+        this.effects.push({ kind, x: Math.round(x ?? hand), y: y ?? head - 2, start: now, until: now + 4500 })
+        return
+      }
     }
   }
 
@@ -981,6 +1188,11 @@ export class Stage {
       back = 'up'
       front = 'up'
     }
+    if (this.calling) {
+      // turned to the person, one arm waving
+      face = 'ahead'
+      front = flip(300) ? 'up' : 'mid'
+    }
     // blinking, unless the eyes are already doing something
     if ((face === 'ahead' || face === 'right') && now % 4200 < 140) face = 'blink'
     return { face, back, front, tint: mood.tint }
@@ -994,19 +1206,24 @@ export class Stage {
       this.x = clamp(this.x, 0, this.maxX())
     }
     const c = new Canvas(columns, rows)
-    const look = LOOKS[this.scene.setting]
+    const look = this.isHome || this.isAway ? HUB_LOOK : LOOKS[this.scene.setting]
     const H = rows * 2
     const now = this.now
 
     // back to front: sky, far layer, motes, ground, props, dirt, figure, effects, words
-    drawSky(c, look, now)
+    drawSky(c, look, now, this.ambience)
     drawFar(c, look, now)
     drawMotes(c, look, now)
     drawGround(c, look)
+    if (this.progress && this.progress.total > 0) drawProgress(c, this.progress)
+    if (this.isHome || this.isAway) this.drawHome(c, H - 2)
+    for (const col of this.pennants) c.sprite(col, H - 2 - PENNANT.rows.length, PENNANT.rows, PENNANT.palette)
 
     // the bubble is laid out before anything is drawn, so a sign board it would cut into is left out
     const bubbleHead = Math.floor((H - 2 - CLAUDE_HEIGHT - Math.round(this.lift)) / 2)
-    const bubble = this.bubble
+    const bubble = this.calling
+      ? this.layoutBubble(rows, this.calling === 'question' ? 'A question for you ▸' : 'Needs your OK ▸', 'call', bubbleHead)
+      : this.bubble
       ? this.layoutBubble(rows, this.bubble.text, this.bubble.kind, bubbleHead)
       // the director is asked ahead now, so its dots show only once the stage has run dry
       : (this.pondering && this.idleSince !== null) || this.run?.beat.do === 'ponder'
@@ -1044,11 +1261,15 @@ export class Stage {
     // the sprite stands on the ground; a crouch is shorter, so the head drops one pixel
     const top = H - 2 - art.length - Math.round(this.lift)
     this.spriteTop = top
+    if (this.hidden) {
+      for (const e of this.effects) drawEffect(c, e, now)
+      if (bubble) this.drawBubble(c, bubble)
+      return c.encode()
+    }
     c.sprite(left, top, art, TINTS[pose.tint])
 
     // the hat: the turn's, or a nightcap while he dozes; tucked away while something rides overhead
-    const isDozing = !this.emote && !this.run && this.idleMs >= DOZE_MS
-    const hatName = isDozing ? 'nightcap' : this.scene.hat ?? 'none'
+    const hatName = this.isDozing ? 'nightcap' : this.scene.hat ?? 'none'
     const hat = hatName === 'none' || this.carrying ? null : HATS_ART[hatName]
     const hatRise = hat ? hat.rows.length - hat.sit : 0
     if (hat) c.sprite(left, top - hatRise, hat.rows, hat.palette, this.facing < 0)
@@ -1092,6 +1313,8 @@ export class Stage {
     if (this.react) c.text(Math.round(this.x + CLAUDE_WIDTH / 2), markRow, this.react.glyph, P.yellow)
     // a tool cue sits just off the head, out of the way of a reaction or a mood balloon
     else if (this.cueMark && !this.balloon) c.text(Math.round(this.x + CLAUDE_WIDTH / 2) + 1, markRow, this.cueMark.glyph, this.cueMark.color)
+
+    if (this.isHome) for (const l of this.homeLabels) c.text(l.col, l.row, l.text, l.color)
 
     const caption = this.run?.beat.caption
     if (caption) c.text(0, 0, ` ${caption} `.slice(0, columns), P.white, P.slate)
@@ -1142,11 +1365,31 @@ export class Stage {
     }
   }
 
+  /** The hub: his keepsakes left of the door, the nearest one's label up, the door open as he passes. */
+  private drawHome(c: Canvas, ground: number) {
+    this.homeLabels = []
+    const near = this.x + CLAUDE_WIDTH / 2
+    for (const { item, col } of this.homeSpots()) {
+      const art = HUB_ART[item.kind]
+      const top = ground - art.rows.length
+      c.sprite(col, top, art.rows, art.palette)
+      const center = col + Math.floor(art.rows[0]!.length / 2)
+      const isNew = this.newItem?.item === item
+      if (isNew || (!this.hidden && Math.abs(near - center) <= 10 && !this.moving)) {
+        const row = Math.max(0, Math.floor(top / 2) - 1)
+        this.homeLabels.push({ col: center - Math.floor([...item.label].length / 2), row, text: item.label, color: isNew ? P.yellow : P.mist })
+      }
+    }
+    const isOpen = this.now < this.doorOpenUntil || (this.leaving !== null && this.leaving.phase !== 'walk')
+    const door = isOpen ? DOOR.open : DOOR.closed
+    c.sprite(this.doorCol(), ground - door.length, door, DOOR.palette)
+  }
+
   /**
    * Where the bubble goes: beside Claude, on whichever side covers the least signage,
    * so a remark and a sign board never cut into each other.
    */
-  private layoutBubble(rows: number, text: string, kind: 'say' | 'think', headRow: number): BubbleLayout {
+  private layoutBubble(rows: number, text: string, kind: BubbleLayout['kind'], headRow: number): BubbleLayout {
     const maxInner = clamp(this.columns - CLAUDE_WIDTH - 8, 10, 40)
     const maxLines = clamp(rows - 3, 1, 4)
     // the narrowest bubble that holds the whole remark, else the widest, ellipsized
@@ -1184,15 +1427,15 @@ export class Stage {
   }
 
   private drawBubble(c: Canvas, b: BubbleLayout) {
-    const style = b.kind === 'say' ? BUBBLE : THOUGHT
+    const style = b.kind === 'say' ? BUBBLE : b.kind === 'call' ? CALL : THOUGHT
     c.box(b.left, b.top, b.lines, style.fg, style.bg, style.border)
     if (b.side === 'right') {
-      if (b.kind === 'say') {
+      if (b.kind !== 'think') {
         c.text(b.left, b.link, '┤', style.border, style.bg)
         c.text(b.left - 2, b.link, '──', style.border)
       } else c.text(b.left - 1, b.link, 'o', style.border)
     } else if (b.side === 'left') {
-      if (b.kind === 'say') {
+      if (b.kind !== 'think') {
         c.text(b.left + b.width - 1, b.link, '├', style.border, style.bg)
         c.text(b.left + b.width, b.link, '──', style.border)
       } else c.text(b.left + b.width, b.link, 'o', style.border)
@@ -1201,7 +1444,7 @@ export class Stage {
 }
 
 type Rect = { left: number; top: number; width: number; height: number }
-type BubbleLayout = Rect & { kind: 'say' | 'think'; lines: string[]; link: number; side: 'right' | 'left' | 'above' }
+type BubbleLayout = Rect & { kind: 'say' | 'think' | 'call'; lines: string[]; link: number; side: 'right' | 'left' | 'above' }
 
 /** The cells a bubble covers, its connector to Claude included. */
 function bubbleRect(b: BubbleLayout): Rect {
@@ -1272,10 +1515,47 @@ function drawEffect(c: Canvas, e: Effect, now: number) {
       c.set(e.x, e.y - t * 2, t < 0.5 ? P.silver : P.mist)
       c.set(e.x + 1, e.y - t * 2, P.mist)
       return
+    case 'balloon': {
+      // let go: it drifts up and off the top, swaying
+      const y = Math.round(e.y - t * (e.y + 8))
+      const x = e.x + Math.round(Math.sin(t * 9) * 1.5)
+      c.sprite(x, y, BALLOON_UP.rows, BALLOON_UP.palette)
+      return
+    }
   }
 }
 
-function drawSky(c: Canvas, look: Look, now: number) {
+/** The task trail: a line along the dirt, lit up to how much is done, a flag at its end. */
+function drawProgress(c: Canvas, p: { done: number; total: number }) {
+  const W = c.columns
+  const H = c.height
+  const end = W - 5
+  const lit = 1 + Math.round(clamp(p.done / p.total, 0, 1) * (end - 1))
+  for (let x = 1; x < end; x++) {
+    if (x < lit) c.set(x, H - 1, P.amber)
+    else if (x % 3 === 0) c.set(x, H - 1, P.tan)
+  }
+  const flag = p.done >= p.total ? GOAL_FLAG_DONE : GOAL_FLAG
+  c.sprite(end, H - 2 - flag.rows.length, flag.rows, flag.palette)
+}
+
+function drawSky(c: Canvas, look: Look, now: number, amb: Ambience = { hour: 12, weather: 'clear' }) {
+  const W = c.columns
+  // out under the sky the local hour shows: a moon and stars at night, a low sun at dawn and dusk
+  const isOpenSky = look.sky === 'sun' || look.sky === 'moon'
+  const isNight = amb.hour >= 21 || amb.hour < 6
+  const isLow = (amb.hour >= 18 && amb.hour < 21) || (amb.hour >= 6 && amb.hour < 8)
+  if (look.sky === 'sun' && isNight) look = { ...look, sky: 'moon' }
+  if (look.sky === 'sun' && isLow) {
+    c.sprite(W - 12, 4, SKY_ART.sun.rows, SKY_ART.sun.palette)
+    look = { ...look, sky: 'none' }
+  }
+  drawSkyArt(c, look, now)
+  // clouds pass in front of the sun or moon
+  if (isOpenSky) drawWeather(c, amb.weather, now)
+}
+
+function drawSkyArt(c: Canvas, look: Look, now: number) {
   const W = c.columns
   if (look.sky === 'stars' || look.sky === 'moon' || look.sky === 'planet') {
     // stars are the one place a lone pixel is right; a few twinkle
@@ -1289,6 +1569,29 @@ function drawSky(c: Canvas, look: Look, now: number) {
   if (look.sky === 'none' || look.sky === 'stars') return
   const art = SKY_ART[look.sky]
   c.sprite(W - 12, 1, art.rows, art.palette)
+}
+
+/** One or two small clouds drifting over; rain clouds let a few drops fall. */
+function drawWeather(c: Canvas, weather: Weather, now: number) {
+  if (weather === 'clear') return
+  const W = c.columns
+  const H = c.height
+  const art = weather === 'rain' ? RAIN_CLOUD : CLOUD
+  const width = art.rows[0]!.length
+  const t = now / 1000
+  for (const [k, speed, y] of [[0, 1.2, 1], [1, 0.8, 3]] as const) {
+    if (k === 1 && weather === 'cloudy') continue
+    const x = Math.round(((k * 37 + t * speed) % (W + width + 6)) - width - 3)
+    c.sprite(x, y, art.rows, art.palette)
+    if (weather !== 'rain') continue
+    for (let d = 0; d < 3; d++) {
+      const fall = H - 4 - (y + art.rows.length)
+      const dy = (t * 14 + d * 7 + k * 3) % (fall + 4)
+      if (dy > fall) continue
+      const dx = x + 2 + d * Math.floor((width - 4) / 2)
+      c.set(dx, y + art.rows.length + dy, RAIN)
+    }
+  }
 }
 
 function drawFar(c: Canvas, look: Look, now: number) {

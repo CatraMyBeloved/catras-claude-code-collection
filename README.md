@@ -14,9 +14,24 @@ set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
 
 ## Plugins
 
-| Plugin | Description |
-| --- | --- |
-| [agent-comic](plugins/agent-comic) | A pixel comic above the prompt: Sonnet turns what the main agent is doing into animated scenes. |
+### [agent-comic](plugins/agent-comic)
+
+A pixel comic in the band above the prompt: a little Claude acts out what the agent is doing.
+
+- **Home hub**: each session opens at Claude's home, among keepsakes from earlier sessions. On the first
+  turn he walks through the door into the turn's world; after a long idle he comes back and naps.
+  Claude can add a keepsake (a trophy, a gem, a plant...) after a real milestone, with the mod's own
+  tool (`hub_add`, deferred, so it costs no context until used). `/comic-hub` lists them.
+- **Needs you**: when a permission prompt or a question is waiting, he stops, turns to you and waves.
+- **Progress**: the agent's task list shows as a trail along the ground, with a flag at the end.
+- **Git**: a commit plants a little flag, a push lets a balloon go.
+- **Sky**: the local hour (moon at night, low sun at dusk) and the session's weather (clouds after
+  failures, rain after several), kept in the background.
+- **Director**: `hybrid` (default) has the model stage each turn's opening and wrap-up, and plays canned
+  scenes in between; `full` stages everything with the model; `off` uses no tokens at all.
+  Set it with `/config`, along with the model, pace and whether the comic stays up between turns.
+
+Commands: `/comic` (on/off), `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
 
 ## Development
 

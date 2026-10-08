@@ -12,7 +12,7 @@ out = sys.argv[1] if len(sys.argv) > 1 else 'dev/out/export'
 clips = json.load(open(f'{out}/frames.json'))
 LABEL = 26
 
-for kind in ('emotions', 'actions'):
+for kind in ('emotions', 'actions', 'features'):
     os.makedirs(f'{out}/{kind}', exist_ok=True)
 
 readme = ['# Agent comic renders', '',
@@ -20,10 +20,11 @@ readme = ['# Agent comic renders', '',
           '(dev/export.ts, dev/export.py in the mod folder). GIFs play at the live 20 fps; '
           'the strips show one frame every 0.5 s.', '']
 sections = {'emotion': ['## Emotions', '', '| emotion | what it shows | animation |', '|---|---|---|'],
-            'action': ['## Actions', '', '| action | what it shows | animation |', '|---|---|---|']}
+            'action': ['## Actions', '', '| action | what it shows | animation |', '|---|---|---|'],
+            'feature': ['## Features', '', '| feature | what it shows | animation |', '|---|---|---|']}
 
 for name, c in clips.items():
-    folder = 'emotions' if c['kind'] == 'emotion' else 'actions'
+    folder = {'emotion': 'emotions', 'action': 'actions', 'feature': 'features'}[c['kind']]
     frames = [render(c['columns'], c['rows'], f) for f in c['frames']]
     w, h = frames[0].size
     titled = []

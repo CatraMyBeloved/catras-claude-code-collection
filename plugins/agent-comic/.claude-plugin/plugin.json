@@ -1,12 +1,23 @@
 {
   "name": "agent-comic",
-  "version": "0.1.0",
-  "description": "A little comic above the prompt: Sonnet turns what the main agent is doing into animated pixel scenes",
+  "version": "0.2.0",
+  "description": "A little comic above the prompt: Claude acts out what the agent is doing in animated pixel scenes, from a home hub with keepsakes",
   "author": {
     "name": "Stein"
   },
   "types": "./types/index.d.ts",
   "userConfig": {
+    "director": {
+      "type": "string",
+      "title": "Director",
+      "description": "Who stages the scenes: hybrid (the model sets up each turn and wraps it up; everything in between is canned, so few tokens), full (the model stages every scene), or off (canned scenes only, no tokens).",
+      "default": "hybrid",
+      "options": [
+        "hybrid",
+        "full",
+        "off"
+      ]
+    },
     "model": {
       "type": "string",
       "title": "Director model",

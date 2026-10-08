@@ -1,19 +1,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
+import { cannedFirst, cannedInterlude, cannedScene, cannedWrap } from './canned'
+import type { Activity } from './canned'
+import { cellText } from './canvas'
 import { DEMO_MS, demoScene, feelBeat } from './demo'
 import { SYSTEM, buildPrompt, describeCall, varietyNotes } from './director'
 import { MAX_INTERLUDES, addTiming, blendLatency, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { Timings } from './pacing'
-import { MOODS, parseScene } from './scene'
-import type { Mood, Scene } from './scene'
+import { HUB_STORE_KEY, HUB_TOOL, HUB_TOOL_SPEC, addHubItem, asHubItems, hubItemFrom } from './hub'
+import type { HubItem } from './hub'
+import { MOODS, clip, parseScene } from './scene'
+import type { Mood, Scene, Stamp } from './scene'
 import { PACES, Stage } from './stage'
+import type { Weather } from './stage'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
 import type { Tally } from './usage'
 
 /** The /config settings, read when the module (re)loads. */
-type Settings = { model: string; pace: keyof typeof PACES; showWhenIdle: boolean }
-let settings: Settings = { model: 'sonnet', pace: 'calm', showWhenIdle: true }
+type Settings = { model: string; pace: keyof typeof PACES; showWhenIdle: boolean; director: Director }
+/** Who stages the scenes: the model for all (full), for a turn's opening and wrap-up (hybrid), or none (off). */
+type Director = 'full' | 'hybrid' | 'off'
+let settings: Settings = { model: 'sonnet', pace: 'calm', showWhenIdle: true, director: 'hybrid' }
 
 const STILL_RUNNING_MS = 4000 // a tool running this long is told to the director before it ends
 const LINGER_MS = 25000 // the band stays this long after a turn ends
@@ -21,6 +29,12 @@ const FRAME_MS = 50
 const MAX_ROWS = 10
 const MIN_ROWS = 6
 const KEY = 'stage'
+const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
+const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
+const WEATHER_MS = 180_000 // failures this recent cloud the sky
+// tools that put a question to the person, who must answer before the turn goes on
+const ASKS_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode'])
+const TEST_RUN = /\b(?:jest|vitest|pytest|mocha|rspec|ctest|tox|phpunit)\b|\b(?:cargo|go|bun|deno|dotnet|mvn|gradle|npm|pnpm|yarn)\s+(?:run\s+)?test\b|\bplugin test\b|\bmake (?:test|check)\b/
 
 const enabled = atom({ plugin: 'agent-comic', key: 'enabled' } as const, true)
 const lingering = atom({ plugin: 'agent-comic', key: 'lingering' } as const, false)
@@ -43,7 +57,7 @@ let retryAfter = 0 // after a failure the director backs off until then
 let isWrapPending = false
 let previous: Scene | null = null
 let recent: Scene[] = [] // the last scenes Sonnet staged, for its variety notes
-let turnSettings: string[] = [] // one per turn, oldest first
+let turnSettings: Scene['setting'][] = [] // one per turn, oldest first
 let turnSetting: Scene['setting'] | null = null // picked by the turn's first scene, then fixed
 let hasLoggedError = false
 let linger: { cancel: () => void } | null = null
@@ -52,6 +66,13 @@ let sessionTally: Tally = emptyTally()
 let latencyMs = 7000 // the director's recent answer time; the first answers correct it
 let firstFreshAt: number | undefined // when the oldest activity not yet staged happened
 let timings: Timings = emptyTimings()
+let acts: Activity[] = [] // what the agent did since the last staged scene, for canned scenes
+let lastSaid: string | undefined // the agent's latest remark to the person
+let failTimes: number[] = [] // recent failures: they bring clouds, and rain
+let hubItems: HubItem[] = []
+let hubAdds = 0
+let tasksMade = 0 // TaskCreate calls this list
+const tasksDone = new Set<string>()
 let answered = 0 // scenes the director handed over this session
 // the main thread's tool calls under way, to tell the director about long ones before they end
 const running = new Map<string, { what: string; since: number; isTold: boolean }>()
@@ -88,39 +109,52 @@ function tellRunning() {
 async function direct($: EngineInterface) {
   tellRunning()
   const now = Date.now()
-  if (askingIn === epoch || now < directorPausedUntil || now < retryAfter) return
+  // between turns, a long idle takes him home through the door
+  if (!isTurnRunning && stage.wantsHome) stage.goHome()
+  stage.ambience = { hour: new Date(now).getHours(), weather: weatherNow(now) }
+  if (askingIn === epoch || now < directorPausedUntil) return
   if (!(await read($, enabled)) || askingIn === epoch) return
   const remainingMs = stage.remainingMs
   const untilFreeMs = stage.untilFreeMs
+  // a canned scene is ready at once: it is asked for as the stage runs dry, not a model's latency ahead
+  const isCannedNext = isCanned(!turnSetting ? 'first' : isWrapPending ? 'wrap' : 'scene') || now < retryAfter
   const ask = nextAsk({
-    now: Date.now(), pace: settings.pace, fresh, lastAsk, lastActivity, isTurnRunning, isWrapPending,
-    isWorldless: !turnSetting, interludes, remainingMs, untilFreeMs, latencyMs,
+    now, pace: settings.pace, fresh, lastAsk, lastActivity, isTurnRunning, isWrapPending,
+    isWorldless: !turnSetting, interludes, remainingMs, untilFreeMs, latencyMs: isCannedNext ? 0 : latencyMs,
   })
   if (!ask) return
   const finished = ask === 'wrap'
   const isInterlude = ask === 'interlude'
   if (isInterlude) interludes++
   isWrapPending = false
+  lastAsk = now
+  // after the turn's first scene, scenes play in that world; before it, the first sets one up
+  const world = turnSetting ? stage.world() : undefined
+  const kind: Stamp['kind'] = finished ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
+  const activity = isInterlude ? undefined : firstFreshAt
+  const expectedLeftMs = isInterlude ? remainingMs : untilFreeMs
+  const batch = acts
+  const unstagedFresh = fresh
+  acts = []
+  fresh = 0
+  firstFreshAt = undefined
+
+  if (isCanned(kind) || now < retryAfter) {
+    const scene = canned(kind, batch, world)
+    if (scene) stageScene(scene, isInterlude)
+    return
+  }
+
+  const interlude = isInterlude
+    ? { n: interludes, quietSecs: Math.round((now - lastActivity) / 1000), isLast: interludes === MAX_INTERLUDES }
+    : undefined
+  const prompt = buildPrompt({
+    goal, log, fresh: unstagedFresh, previous, finished, interlude, world,
+    variety: varietyNotes(recent, Math.random, turnSettings, turnSetting ?? undefined),
+  })
   const mine = epoch
   askingIn = mine
   stage.pondering = true
-  lastAsk = Date.now()
-  const interlude = isInterlude
-    ? { n: interludes, quietSecs: Math.round((Date.now() - lastActivity) / 1000), isLast: interludes === MAX_INTERLUDES }
-    : undefined
-  // after the turn's first scene, Sonnet works in that world; before it, it sets one up
-  const world = turnSetting ? stage.world() : undefined
-  const prompt = buildPrompt({
-    goal, log, fresh, previous, finished, interlude, world,
-    variety: varietyNotes(recent, Math.random, turnSettings, turnSetting ?? undefined),
-  })
-  const activity = isInterlude ? undefined : firstFreshAt
-  const kind = finished ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
-  const expectedLeftMs = isInterlude ? remainingMs : untilFreeMs
-  // the lines go out as staged; if no scene comes of them they are news again
-  const unstaged = { fresh, firstFreshAt }
-  fresh = 0
-  firstFreshAt = undefined
   let isStaged = false
   try {
     const asked = Date.now()
@@ -133,18 +167,7 @@ async function direct($: EngineInterface) {
     if (!r.isAnswered) return logOnce($, `no scene (${r.reason})`)
     const scene = parseScene(r.text, world)
     if ('error' in scene) return logOnce($, `unusable scene (${scene.error})`)
-    // the world changes between turns, not within one: later scenes keep the first scene's setting
-    if (turnSetting) scene.setting = turnSetting
-    else {
-      turnSetting = scene.setting
-      turnSettings = [...turnSettings, scene.setting].slice(-6)
-    }
-    previous = scene
-    recent = [...recent, scene].slice(-6)
-    scene.stamp = { kind, activity, asked, answered: answeredAt, expectedLeftMs }
-    scene.isNews = !isInterlude
-    answered++
-    stage.queue(scene)
+    stageScene(scene, isInterlude, { kind, activity, asked, answered: answeredAt, expectedLeftMs })
     isStaged = true
     failures = 0
     hasLoggedError = false
@@ -156,13 +179,115 @@ async function direct($: EngineInterface) {
       stage.pondering = false
     }
     if (!isStaged && mine === epoch) {
-      fresh += unstaged.fresh
-      if (unstaged.firstFreshAt !== undefined) firstFreshAt = Math.min(firstFreshAt ?? Infinity, unstaged.firstFreshAt)
-      if (finished) isWrapPending = true
+      // no scene from the model: a canned one plays instead, and the model rests a while
       failures++
       retryAfter = Date.now() + Math.min(60_000, 1_000 * 2 ** failures) // 2s, 4s, 8s ... a minute
+      const scene = canned(kind, batch, world)
+      if (scene) stageScene(scene, isInterlude)
     }
   }
+}
+
+/** Whether a scene of this kind is canned under the /config director setting. */
+function isCanned(kind: Stamp['kind']): boolean {
+  return settings.director === 'off' || (settings.director === 'hybrid' && (kind === 'scene' || kind === 'interlude'))
+}
+
+/** A canned scene of `kind`; none for a wrap-up of a turn that never got a world. */
+function canned(kind: Stamp['kind'], batch: readonly Activity[], world: ReturnType<Stage['world']> | undefined): Scene | null {
+  if (kind === 'first') return cannedFirst(goal ?? '', turnSettings, Math.random)
+  if (!world) return null
+  if (kind === 'scene') return cannedScene(batch, world, Math.random)
+  if (kind === 'interlude') return cannedInterlude(world, interludes, Math.random)
+  return cannedWrap(world, lastSaid, false, Math.random)
+}
+
+/** Queues a scene for the turn: the first one fixes the turn's setting. Model scenes carry their timings. */
+function stageScene(scene: Scene, isInterlude: boolean, stamp?: Stamp) {
+  // the world changes between turns, not within one: later scenes keep the first scene's setting
+  if (turnSetting) scene.setting = turnSetting
+  else {
+    turnSetting = scene.setting
+    turnSettings = [...turnSettings, scene.setting].slice(-6)
+  }
+  previous = scene
+  recent = [...recent, scene].slice(-6)
+  if (stamp) {
+    scene.stamp = stamp
+    answered++
+  }
+  scene.isNews = !isInterlude
+  stage.queue(scene)
+}
+
+/** Clear, cloudy after a failure, rain after several: the last few minutes' work, in the sky. */
+function weatherNow(now: number): Weather {
+  failTimes = failTimes.filter(t => now - t < WEATHER_MS)
+  return failTimes.length >= 3 ? 'rain' : failTimes.length ? 'cloudy' : 'clear'
+}
+
+const baseName = (path: string) => clip(cellText(path.split(/[\\/]/).pop() ?? path), 20)
+
+/**
+ * One main-thread tool call as the comic sees it: an activity for canned scenes, and its
+ * side effects: git moments, the task trail, failures for the weather.
+ */
+function observe(e: Record<string, unknown>, ran: { isError?: boolean; deny?: string }) {
+  const tool = String(e.tool)
+  const str = (k: string) => (typeof e[k] === 'string' ? (e[k] as string) : '')
+  const failed = ran.isError === true || ran.deny !== undefined
+  const fail = (label?: string) => {
+    failTimes.push(Date.now())
+    acts.push({ kind: 'fail', label })
+  }
+  switch (tool) {
+    case 'Read': case 'NotebookRead':
+      return failed ? fail(baseName(str('file_path'))) : acts.push({ kind: 'read', label: baseName(str('file_path')) })
+    case 'Edit': case 'Write': case 'NotebookEdit':
+      return failed ? fail(baseName(str('file_path'))) : acts.push({ kind: 'edit', label: baseName(str('file_path')) })
+    case 'Grep': case 'Glob':
+      return acts.push({ kind: 'search', label: clip(cellText(str('pattern')), 20) })
+    case 'WebFetch': case 'WebSearch':
+      return failed ? fail() : acts.push({ kind: 'web' })
+    case 'Agent':
+      return acts.push({ kind: 'helper' })
+    case 'TodoWrite': {
+      const todos = Array.isArray(e.todos) ? (e.todos as { status?: unknown }[]) : []
+      const done = todos.filter(t => t?.status === 'completed').length
+      stage.progress = todos.length ? { done, total: todos.length } : null
+      return
+    }
+    case 'TaskCreate':
+      if (!failed) tasksMade++
+      return showTasks()
+    case 'TaskUpdate': {
+      const id = str('taskId') || str('id')
+      if (!failed && id && e.status === 'completed') tasksDone.add(id)
+      return showTasks()
+    }
+    case 'Bash': case 'PowerShell': {
+      const command = str('command')
+      if (/\bgit\s+commit\b/.test(command) && !failed) {
+        stage.gitMoment('commit')
+        return acts.push({ kind: 'commit' })
+      }
+      if (/\bgit\s+push\b/.test(command) && !failed) {
+        stage.gitMoment('push')
+        return acts.push({ kind: 'push' })
+      }
+      if (TEST_RUN.test(command)) {
+        if (failed) failTimes.push(Date.now())
+        else failTimes = [] // green again: the sky clears
+        return acts.push({ kind: 'test', ok: !failed })
+      }
+      return failed ? fail() : acts.push({ kind: 'run' })
+    }
+  }
+  if (failed) fail()
+}
+
+function showTasks() {
+  if (tasksMade > 0) stage.progress = { done: Math.min(tasksDone.size, tasksMade), total: tasksMade }
 }
 
 /** Asks now rather than at the next tick: a new turn, or its end, should not wait a second. */
@@ -211,6 +336,7 @@ export const register: Register = (on, options) => {
     model: options.model === 'haiku' ? 'haiku' : 'sonnet',
     pace: options.pace === 'normal' || options.pace === 'lively' ? options.pace : 'calm',
     showWhenIdle: options.showWhenIdle !== false,
+    director: options.director === 'full' || options.director === 'off' ? options.director : 'hybrid',
   }
   stage.pace = PACES[settings.pace]
   latencyMs = settings.model === 'haiku' ? 4000 : 7000
@@ -226,6 +352,13 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'comic-demo', description: 'Play the comic tour: every mood, then every action, captioned' })
     await $.command.register({ name: 'comic-stats', description: 'Show the tokens the comic director has spent: this session and today' })
     await $.command.register({ name: 'comic-feel', description: `Make Claude act out a mood: ${FEELINGS.join(', ')}` })
+
+    await $.command.register({ name: 'comic-hub', description: 'List the keepsakes in the comic hub, or remove one: /comic-hub remove <n>' })
+    // the hub: the session opens there, among the keepsakes of earlier sessions
+    hubItems = asHubItems(await $.store.get(HUB_STORE_KEY))
+    stage.setHome(hubItems)
+    stage.startHome()
+    await $.tool.register(HUB_TOOL_SPEC)
 
     $.clock.every(FRAME_MS, () => drawFrame($))
     $.clock.every(1000, () => direct($).catch(() => undefined))
@@ -254,6 +387,34 @@ export const register: Register = (on, options) => {
 ${formatTimings(timings, latencyMs, answered)}` }
   })
 
+  on('command.run', { command: 'comic-hub' }, async ($, e) => {
+    const remove = /^remove\s+(\d+)$/.exec(e.args.trim())
+    if (remove) {
+      const n = Number(remove[1])
+      if (n < 1 || n > hubItems.length) return { text: `No keepsake ${n}: the hub has ${hubItems.length}.` }
+      const [gone] = hubItems.splice(n - 1, 1)
+      hubItems = [...hubItems]
+      await $.store.set(HUB_STORE_KEY, hubItems)
+      stage.setHome(hubItems)
+      return { text: `Removed the ${gone!.kind} "${gone!.label}".` }
+    }
+    if (!hubItems.length) return { text: 'The hub has no keepsakes yet. Claude adds one after a real milestone.' }
+    const lines = hubItems.map((h, i) => `${i + 1}. ${h.kind}: ${h.label} (${new Date(h.at).toISOString().slice(0, 10)})`)
+    return { text: `Keepsakes in the hub, oldest first:\n${lines.join('\n')}\n\nRemove one with /comic-hub remove <n>.` }
+  })
+
+  // the comic's own tool: Claude keeps a milestone in the hub
+  on('tool.call', { tool: HUB_TOOL_NAME }, async ($, e) => {
+    if (hubAdds >= MAX_HUB_ADDS) return { result: 'Not added: the hub already got its keepsake this session. Keep the next one for another milestone.' }
+    const item = hubItemFrom(e, Date.now())
+    if ('error' in item) return { result: `Not added: ${item.error}.` }
+    hubAdds++
+    hubItems = addHubItem(hubItems, item)
+    await $.store.set(HUB_STORE_KEY, hubItems)
+    stage.addHomeItem(item)
+    return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.` }
+  })
+
   on('command.run', { command: 'comic-feel' }, async ($, e) => {
     const mood = FEELINGS.find(m => m === e.args.trim().toLowerCase())
     if (!mood) return { text: `Usage: /comic-feel <mood>, one of: ${FEELINGS.join(', ')}` }
@@ -273,14 +434,24 @@ ${formatTimings(timings, latencyMs, answered)}` }
     retryAfter = 0
     goal = e.text.slice(0, 300)
     log = []
+    acts = []
+    lastSaid = undefined
+    stage.attention = null
+    // a finished task list is done with; one still under way carries on into this turn
+    if (stage.progress && stage.progress.done >= stage.progress.total) {
+      stage.progress = null
+      tasksMade = 0
+      tasksDone.clear()
+    }
     fresh = 0
     lastAsk = 0
     isWrapPending = false
     isTurnRunning = true
     turnSetting = null
     note(`the person asked: ${goal}`)
-    // something to see at once while Sonnet sets up the world: idle (or asleep), Claude stops to think
-    if (stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
+    // something to see at once while the world is set up: at home he heads for the door,
+    // elsewhere (idle, or asleep) he stops to think
+    if (!stage.leaveHome() && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
     askSoon($)
     return next(e)
   })
@@ -302,14 +473,20 @@ ${formatTimings(timings, latencyMs, answered)}` }
       if (cue) stage.cue(cue)
       running.set(e.tool_use_id, { what: describeCall(e as unknown as Record<string, unknown>, {}), since: Date.now(), isTold: false })
     }
+    // a question for the person: he turns to them until it is answered
+    const isAsking = isMain && ASKS_PERSON.has(e.tool)
+    if (isAsking) stage.attention = 'question'
     const startedAt = Date.now()
     let ran: Awaited<ReturnType<typeof next>>
     try {
       ran = await next(e)
     } finally {
       running.delete(e.tool_use_id)
+      // answered (a question, or a permission prompt on the way): back to the story
+      if (isMain) stage.attention = null
     }
     if (isMain && (ran.isError || ran.deny)) stage.cue('fail')
+    if (isMain) observe(e as unknown as Record<string, unknown>, ran)
     if (isHelper) {
       // back within a few seconds: it was only launched and works on in the background
       if (input.run_in_background === true || Date.now() - startedAt < 5000) stage.helperBackground(e.tool_use_id)
@@ -317,6 +494,13 @@ ${formatTimings(timings, latencyMs, answered)}` }
     }
     note(describeCall(e as unknown as Record<string, unknown>, ran))
     return ran
+  })
+
+  // a tool call the person must allow: he turns to them while the prompt is up
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    if (verdict.decision === 'ask' && !e.agentId) stage.attention = 'permission'
+    return verdict
   })
 
   // a subagent finished, foreground or background: its small Claude walks over and reports
@@ -333,7 +517,11 @@ ${formatTimings(timings, latencyMs, answered)}` }
         .join(' ')
         .replace(/\s+/g, ' ')
         .trim()
-      if (text) note(`the agent said: ${text.slice(0, 220)}`)
+      if (text) {
+        note(`the agent said: ${text.slice(0, 220)}`)
+        lastSaid = clip(cellText(text), 120)
+        acts.push({ kind: 'said', text: clip(cellText(text), 60) })
+      }
     }
     return stored
   })
@@ -343,12 +531,16 @@ ${formatTimings(timings, latencyMs, answered)}` }
     // a subagent's turn ends inside the main one: its small Claude reports through SubagentStop
     if (e.agentId) return done
     isTurnRunning = false
+    stage.attention = null
     if (e.reason === 'aborted') {
-      // stopped by the person: no celebration, and what was asked for the stopped work is dropped
+      // stopped by the person: no celebration, and what was asked for the stopped work is dropped;
+      // a shrug in the turn's world says so, no model needed
       epoch++
       fresh = 0
       firstFreshAt = undefined
       isWrapPending = false
+      acts = []
+      if (turnSetting) stage.queue(cannedWrap(stage.world(), undefined, true, Math.random))
     } else {
       isWrapPending = true
       askSoon($)
