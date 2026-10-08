@@ -1,6 +1,6 @@
 // The animation: plays a scene's beats with the Claude figure and draws each frame.
 
-import { Canvas, cellText } from './canvas'
+import { Canvas, DEFAULT, cellText } from './canvas'
 import type { Beat, Hat, Mood, Prop, Scene } from './scene'
 import { BALLOON, BITS, HATS_ART, MINI_HEIGHT, MINI_WIDTH, miniClaude, CLAUDE_HEIGHT, MOOD_ICONS, CLAUDE_WIDTH, FLAG_WAVE, LOOKS, ORANGE, P, PROPS, SKY_ART, TINTS, bookColor, claude } from './sprites'
 import type { Arm, Face, Look, Tint } from './sprites'
@@ -1314,7 +1314,16 @@ export class Stage {
     // a tool cue sits just off the head, out of the way of a reaction or a mood balloon
     else if (this.cueMark && !this.balloon) c.text(Math.round(this.x + CLAUDE_WIDTH / 2) + 1, markRow, this.cueMark.glyph, this.cueMark.color)
 
-    if (this.isHome) for (const l of this.homeLabels) c.text(l.col, l.row, l.text, l.color)
+    if (this.isHome) {
+      for (const l of this.homeLabels) {
+        // clear sky behind each title, so a drifting mote never shows through as a block
+        for (let k = 0; k < [...l.text].length; k++) {
+          c.set(l.col + k, l.row * 2, DEFAULT)
+          c.set(l.col + k, l.row * 2 + 1, DEFAULT)
+        }
+        c.text(l.col, l.row, l.text, l.color)
+      }
+    }
 
     const caption = this.run?.beat.caption
     if (caption) c.text(0, 0, ` ${caption} `.slice(0, columns), P.white, P.slate)
@@ -1369,16 +1378,30 @@ export class Stage {
   private drawHome(c: Canvas, ground: number) {
     this.homeLabels = []
     const near = this.x + CLAUDE_WIDTH / 2
+    // every keepsake keeps its title up, dim; the one he stands by (or a new one) brightly
+    const titles: { text: string; center: number; row: number; color: number; rank: number; order: number }[] = []
     for (const { item, col } of this.homeSpots()) {
       const art = HUB_ART[item.kind]
       const top = ground - art.rows.length
       c.sprite(col, top, art.rows, art.palette)
       const center = col + Math.floor(art.rows[0]!.length / 2)
       const isNew = this.newItem?.item === item
-      if (isNew || (!this.hidden && Math.abs(near - center) <= 10 && !this.moving)) {
-        const row = Math.max(0, Math.floor(top / 2) - 1)
-        this.homeLabels.push({ col: center - Math.floor([...item.label].length / 2), row, text: item.label, color: isNew ? P.yellow : P.mist })
-      }
+      const isNear = !this.hidden && Math.abs(near - center) <= 10 && !this.moving
+      titles.push({
+        text: item.label, center, row: Math.max(0, Math.floor(top / 2) - 1),
+        color: isNew ? P.yellow : isNear ? P.silver : P.steel, rank: isNew ? 0 : isNear ? 1 : 2, order: titles.length,
+      })
+    }
+    // the brightest are placed first; neighbours step up a row rather than run into each other
+    const taken: [number, number, number][] = [] // row, left, right
+    for (const t of [...titles].sort((a, b) => a.rank - b.rank)) {
+      const width = [...t.text].length
+      const left = clamp(t.center - Math.floor(width / 2), 0, Math.max(0, this.columns - width))
+      const rows = t.order % 2 ? [t.row - 1, t.row] : [t.row, t.row - 1]
+      const row = rows.find(r => r >= 0 && taken.every(([tr, l, r2]) => tr !== r || left + width + 1 <= l || r2 + 1 <= left))
+      if (row === undefined) continue
+      taken.push([row, left, left + width])
+      this.homeLabels.push({ col: left, row, text: t.text, color: t.color })
     }
     const isOpen = this.now < this.doorOpenUntil || (this.leaving !== null && this.leaving.phase !== 'walk')
     const door = isOpen ? DOOR.open : DOOR.closed

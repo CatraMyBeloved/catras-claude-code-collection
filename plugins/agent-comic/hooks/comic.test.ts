@@ -950,3 +950,16 @@ test('a permission prompt puts the call out on the band', async ($, on) => {
   expect(text).toContain('Needs your OK')
   await mounted.unmount()
 })
+
+test('at home every keepsake keeps its title up, and long neighbouring titles never run together', async () => {
+  const st = new Stage(() => 0.5)
+  st.frame(90, 10)
+  st.setHome([
+    { kind: 'trophy', label: 'auth bug slain', at: 1 }, { kind: 'statue', label: 'hub world built', at: 2 },
+    { kind: 'gem', label: 'rare find', at: 3 },
+  ])
+  st.startHome()
+  st.step(1_000_000)
+  const text = allText(st)
+  for (const title of ['auth bug slain', 'hub world built', 'rare find']) expect(text).toContain(title)
+})
