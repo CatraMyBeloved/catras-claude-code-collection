@@ -988,7 +988,7 @@ test('at home every keepsake keeps its title up, and long neighbouring titles ne
   for (const title of ['auth bug slain', 'hub world built', 'rare find']) expect(text).toContain(title)
 })
 
-test('woken from a nap at home, he starts up and sprints for the door', async () => {
+test('a new turn has him sprint for the door, awake or woken from a nap', async () => {
   const leaveFrom = (isAsleep: boolean) => {
     const st = new Stage(() => 0.5)
     st.frame(90, 10)
@@ -1010,7 +1010,9 @@ test('woken from a nap at home, he starts up and sprints for the door', async ()
     while (st.home && t < start + 30_000) st.step((t += 50))
     return t - start
   }
-  const walked = leaveFrom(false)
-  const sprinted = leaveFrom(true)
-  expect(sprinted).toBeLessThan(walked * 0.7)
+  // about 60 columns to the door: a calm walk (9 a second) would take near 7 s, a sprint under 3
+  const awake = leaveFrom(false)
+  const woken = leaveFrom(true)
+  expect(awake).toBeLessThan(4500)
+  expect(woken).toBeLessThan(awake + 1000) // the start up costs well under a second
 })

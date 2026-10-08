@@ -85,7 +85,7 @@ const features: Record<string, Feature> = {
   'hub-new-keepsake': { shows: 'Claude adds a keepsake with the hub tool: it pops in, labelled', ms: 4000, columns: 90,
     setup: s => { s.setHome(KEEPSAKES.slice(0, 3)); s.startHome() },
     at: [[800, s => s.addHomeItem({ kind: 'medal', label: 'parser rewrite', at: 9 })]] },
-  'door-out': { shows: 'a new turn: he walks to the door, goes through, and steps into the world of the turn', ms: 11000, columns: 90,
+  'door-out': { shows: 'a new turn: he sprints to the door, goes through, and steps into the world of the turn', ms: 11000, columns: 90,
     setup: s => { s.setHome(KEEPSAKES); s.startHome() },
     at: [[600, s => { s.leaveHome(); s.queue(world) }]] },
   'door-home': { shows: 'a long idle between turns: back home through the door, and a nap soon after', ms: 19000, columns: 90,

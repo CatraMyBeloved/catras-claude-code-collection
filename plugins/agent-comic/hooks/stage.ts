@@ -329,15 +329,15 @@ export class Stage {
   }
 
   /**
-   * A new turn while home: he walks to the door and goes through; the turn's world
-   * loads once he is in. Woken from a nap, he starts up and sprints for it.
+   * A new turn while home: he sprints for the door and goes through (the turn's world
+   * loads once he is in, so he never keeps it waiting); woken from a nap, he starts up first.
    * False when he is not home (nothing to do).
    */
   leaveHome(): boolean {
     if (!this.isHome || this.leaving) return false
-    const isSprint = this.isDozing
-    this.leaving = { phase: isSprint ? 'wake' : 'walk', at: this.now, isSprint }
-    this.emote = isSprint ? { mood: 'surprised', until: this.now + 700 } : null
+    const isWaking = this.isDozing
+    this.leaving = { phase: isWaking ? 'wake' : 'walk', at: this.now, isSprint: true }
+    this.emote = isWaking ? { mood: 'surprised', until: this.now + 700 } : null
     this.wanderTo = null
     return true
   }
