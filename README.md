@@ -41,6 +41,10 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
 - **Director**: `hybrid` (default) has the model set up the session's world and stage each turn's opening and
   wrap-up in it, and plays canned scenes in between; `full` stages everything with the model; `off` uses no tokens at all.
   Set it with `/config`, along with the model, pace and whether the comic stays up between turns.
+- **Places**: other plugins can add places to Claude's world through `$.comic` (a garden, a pond, a minigame).
+  Between turns, wooden signs in the hub's top corners lead to them (`a`/`d` once the band has focus); while
+  Claude works the comic takes the band back. With no place installed nothing changes. How to build one:
+  [EXTENDING.md](plugins/agent-comic/EXTENDING.md); a complete example is [pond-place](examples/pond-place).
 
 Commands: `/comic` (on/off), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
 
@@ -73,7 +77,10 @@ but Claude Code caches it as a separate entry, so it never kept the main convers
 ```
 claude plugin validate .
 claude plugin test plugins/cache-keepalive
+claude plugin test examples/pond-place
 ```
+
+`examples/` holds example plugins that are not in the marketplace; copy one as a starting point.
 
 `CACHE_KEEPALIVE_HEADLESS=1` lets cache-keepalive run under `claude -p --plugin-dir plugins/cache-keepalive`,
 for checking its cache behaviour without an interactive session.

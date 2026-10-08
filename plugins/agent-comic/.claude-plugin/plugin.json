@@ -1,6 +1,6 @@
 {
   "name": "agent-comic",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A little comic above the prompt: Claude acts out what the agent is doing in animated pixel scenes, from a home hub with keepsakes",
   "author": {
     "name": "Stein"

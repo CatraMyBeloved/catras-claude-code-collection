@@ -20,7 +20,7 @@ const CUT_AFTER = 3 // beats a scene plays before news may end it at its next pa
 const MAX_PLANTED_SIGNS = 2 // a scene this old gives way to a waiting one mid-play
 const BUBBLE = { fg: P.sand, bg: P.wine, border: ORANGE }
 const THOUGHT = { fg: P.silver, bg: P.night, border: P.mist }
-const SIGN = { fg: P.white, bg: P.bark, border: P.tan }
+export const SIGN = { fg: P.white, bg: P.bark, border: P.tan }
 const CALL = { fg: P.ink, bg: P.yellow, border: P.amber } // "needs you": the one loud thing on the stage
 const PENNANT = { rows: ['phh', 'pyy', 'p..', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
 const GOAL_FLAG = { rows: ['phh', 'prr', 'p..', 'p..'], palette: { p: P.silver, h: P.coral, r: P.red } }
@@ -154,6 +154,8 @@ export class Stage {
   ambience: Ambience = { hour: 12, weather: 'clear' }
   /** The agent's task list: a trail along the ground, lit as tasks are done. */
   progress: { done: number; total: number } | null = null
+  /** Signs at the band's edges to the places beside this one, by name; null draws none. */
+  routeSigns: { left: string | null; right: string | null } | null = null
 
   // home: the hub, its keepsakes and the door to the turn's world
   private isHome = false
@@ -1618,6 +1620,7 @@ export class Stage {
         c.sprite(bed + BED_HEAD_X + 1, this.spriteTop - 1, SLEEP_CAP.rows, SLEEP_CAP.palette)
         c.sprite(bed, H - 2 - BED_OVER.rows.length, BED_OVER.rows, BED_OVER.palette)
       }
+      if (this.routeSigns) this.drawRouteSigns(c)
       for (const e of this.effects) drawEffect(c, e, now)
       if (bubble) this.drawBubble(c, bubble)
       return c.encode()
@@ -1690,6 +1693,8 @@ export class Stage {
       }
     }
 
+    if (this.routeSigns) this.drawRouteSigns(c)
+
     const caption = this.run?.beat.caption
     if (caption) c.text(0, 0, ` ${caption} `.slice(0, columns), P.white, P.slate)
 
@@ -1736,6 +1741,19 @@ export class Stage {
     if (prop.label && ground === c.height - 2) {
       const row = Math.max(0, Math.floor(top / 2) - 1)
       c.text(col + Math.floor(propWidth(prop) / 2) - Math.floor([...prop.label].length / 2), row, prop.label, P.mist)
+    }
+  }
+
+  /**
+   * A wooden sign in each top corner that has one: "◂ name" at the left, "name ▸" at the right.
+   * They hang up there, clear of the keepsakes and their titles along the ground.
+   */
+  private drawRouteSigns(c: Canvas) {
+    const { left, right } = this.routeSigns ?? { left: null, right: null }
+    if (left) c.box(0, 0, [`◂ ${left}`], SIGN.fg, SIGN.bg, SIGN.border)
+    if (right) {
+      const label = `${right} ▸`
+      c.box(Math.max(0, this.columns - [...label].length - 4), 0, [label], SIGN.fg, SIGN.bg, SIGN.border)
     }
   }
 

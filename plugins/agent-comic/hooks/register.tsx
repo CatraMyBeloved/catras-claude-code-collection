@@ -18,6 +18,8 @@ import { PACES, Stage } from './stage'
 import type { Weather } from './stage'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
 import type { Tally } from './usage'
+import { ALIVE_MS, COMIC_VERSION, HUB, asPlace, enteringFrom, kit, routeOf, withPlace, withoutPlace } from './places'
+import type { Comic, ComicSide, ComicState, ComicStop } from '../types'
 
 /** The /config settings, read when the module (re)loads. */
 type Settings = { model: string; pace: keyof typeof PACES; showWhenIdle: boolean; director: Director }
@@ -55,6 +57,14 @@ const TEST_RUN = /\b(?:jest|vitest|pytest|mocha|rspec|ctest|tox|phpunit)\b|\b(?:
 
 const enabled = atom({ plugin: 'agent-comic', key: 'enabled' } as const, true)
 const lingering = atom({ plugin: 'agent-comic', key: 'lingering' } as const, false)
+// the world beyond the hub: places other plugins add through $.comic (places.ts)
+const bandState = atom({ plugin: 'agent-comic', key: 'state' } as const, 'hidden' as ComicState)
+const here = atom({ plugin: 'agent-comic', key: 'here' } as const, null as string | null)
+const cameFrom = atom({ plugin: 'agent-comic', key: 'cameFrom' } as const, null as ComicSide | null)
+const ring = atom({ plugin: 'agent-comic', key: 'places' } as const, [HUB] as ComicStop[])
+const aliveAt = new Map<string, number>() // when each place last said it was drawing
+const SIGN_LEFT = 'sign-left'
+const SIGN_RIGHT = 'sign-right'
 
 const stage = new Stage()
 let mount: { requestId: string; columns: number; rows: number } | null = null
@@ -370,13 +380,54 @@ async function countUsage($: EngineInterface, usage: Parameters<typeof addUsage>
 }
 
 function endLinger($: EngineInterface) {
-  void update($, lingering, () => false)
+  void update($, lingering, () => false).then(() => syncState($)).catch(() => undefined)
+}
+
+/** Tells the places what the band is doing; the comic itself never reads it. */
+async function syncState($: EngineInterface) {
+  const isOn = await read($, enabled)
+  const isLingering = await read($, lingering)
+  const state: ComicState = !isOn ? 'hidden'
+    : isTurnRunning || isPetTurn ? 'working'
+    : isLingering ? 'wrapping'
+    : settings.showWhenIdle ? 'idle' : 'hidden'
+  // read as stored, not with the atom's initial: other plugins see only what was written
+  if ((await $.state.get({ plugin: 'agent-comic', key: 'state' })).value !== state) await update($, bandState, () => state)
+}
+
+/** Claude goes to a place on the ring (null: the hub); an id not on it is ignored. */
+async function goTo($: EngineInterface, id: string | null, from: ComicSide | null) {
+  if (id !== null && !(await read($, ring)).some(s => s.id === id)) return
+  if (id !== null) aliveAt.set(id, await $.clock.now())
+  // the side first, so the place reads it as it takes over
+  await update($, cameFrom, () => from)
+  await update($, here, () => id)
+}
+
+/** Follows the sign on side `dir`, if there is one. */
+async function stepTo($: EngineInterface, dir: ComicSide) {
+  const route = routeOf(await read($, ring), await read($, here))
+  const to = dir === -1 ? route.left : route.right
+  if (to) await goTo($, to.id, enteringFrom(dir))
+}
+
+/** A place that stopped drawing (it failed, or was turned off) sends Claude home to the hub. */
+async function checkPlace($: EngineInterface) {
+  const id = await read($, here)
+  if (id === null) return
+  if (!(await read($, ring)).some(s => s.id === id)) return goTo($, null, null)
+  const now = await $.clock.now()
+  const last = aliveAt.get(id)
+  // it draws only while the band is idle: until then, and on the way in, it has its grace
+  if ((await read($, bandState)) !== 'idle' || last === undefined) return void aliveAt.set(id, now)
+  if (now - last > ALIVE_MS) await goTo($, null, null)
 }
 
 /** Keeps the band up for `ms` even with no turn running, and holds the director off. */
 async function showFor($: EngineInterface, ms: number) {
   directorPausedUntil = Date.now() + ms
   await update($, lingering, () => true)
+  await syncState($)
   linger?.cancel()
   linger = $.clock.after(ms, () => endLinger($))
 }
@@ -416,9 +467,79 @@ export const register: Register = (on, options) => {
     }
   }
 
+  // $.comic: other plugins add places to the comic's world (EXTENDING.md). These are its plain
+  // answers; the hooks below do the work, since only a hook has $
+  on('engine.create', async ($, e, next) => {
+    const built = await next(e)
+    const comic: Comic = {
+      version: async () => COMIC_VERSION,
+      addPlace: async () => undefined,
+      removePlace: async () => undefined,
+      places: async () => [HUB],
+      route: async () => ({ left: null, right: null }),
+      go: async () => undefined,
+      step: async () => undefined,
+      alive: async () => undefined,
+      kit: async () => kit(),
+    }
+    return { ...built, comic }
+  })
+
+  on('comic.addPlace', async ($, e, next) => {
+    const place = asPlace(e)
+    if (place) await update($, ring, r => withPlace(r, place))
+    return next(e)
+  })
+
+  on('comic.removePlace', async ($, e, next) => {
+    if (typeof e.id === 'string') {
+      const id = e.id
+      await update($, ring, r => withoutPlace(r, id))
+      aliveAt.delete(id)
+      if ((await read($, here)) === id) await goTo($, null, null)
+    }
+    return next(e)
+  })
+
+  on('comic.places', async $ => ({ value: await read($, ring) }))
+
+  on('comic.route', async $ => ({ value: routeOf(await read($, ring), await read($, here)) }))
+
+  on('comic.go', async ($, e, next) => {
+    if (e.id === null || typeof e.id === 'string') await goTo($, e.id, null)
+    return next(e)
+  })
+
+  on('comic.step', async ($, e, next) => {
+    if (e.dir === -1 || e.dir === 1) await stepTo($, e.dir)
+    return next(e)
+  })
+
+  on('comic.alive', async ($, e, next) => {
+    const place = asPlace(e)
+    if (place) {
+      // the comic reloaded and lost its ring: the place is added back as it says it is there
+      if (!(await read($, ring)).some(s => s.id === place.id)) await update($, ring, r => withPlace(r, place))
+      aliveAt.set(place.id, await $.clock.now())
+    }
+    return next(e)
+  })
+
+  // a sign at the hub's edge: Claude goes to the place beside it
+  on('ui.press', { element: SIGN_LEFT }, async $ => {
+    await stepTo($, -1)
+    return { element: SIGN_LEFT }
+  })
+
+  on('ui.press', { element: SIGN_RIGHT }, async $ => {
+    await stepTo($, 1)
+    return { element: SIGN_RIGHT }
+  })
+
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get('enabled')
     if (typeof stored === 'boolean') await update($, enabled, () => stored)
+    await syncState($)
 
     await $.command.register({ name: 'comic', description: 'Turn the agent comic above the prompt on or off' })
     await $.command.register({ name: 'comic-demo', description: 'Play the comic tour: every mood, then every action, captioned' })
@@ -435,6 +556,7 @@ export const register: Register = (on, options) => {
 
     $.clock.every(FRAME_MS, () => drawFrame($))
     $.clock.every(1000, () => direct($).catch(() => undefined))
+    $.clock.every(1000, () => checkPlace($).catch(() => undefined))
 
     return next(e)
   })
@@ -443,6 +565,7 @@ export const register: Register = (on, options) => {
     const isOn = !(await read($, enabled))
     await update($, enabled, () => isOn)
     await $.store.set('enabled', isOn)
+    await syncState($)
     return { text: isOn ? 'Comic on: it plays above the prompt while Claude works.' : 'Comic off.' }
   })
 
@@ -560,6 +683,7 @@ ${formatTimings(timings, latencyMs, answered)}` }
       isWorldShown = true
     } else if (!isLeaving && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
     askSoon($)
+    await syncState($)
     return next(e)
   })
 
@@ -647,6 +771,7 @@ ${formatTimings(timings, latencyMs, answered)}` }
     if (i >= 0) {
       pendingPats.splice(i, 1)
       isPetTurn = true
+      await syncState($)
     }
     return next(e)
   })
@@ -657,6 +782,7 @@ ${formatTimings(timings, latencyMs, answered)}` }
     if (e.agentId) return done
     if (isPetTurn) {
       isPetTurn = false
+      await syncState($)
       return done
     }
     isTurnRunning = false
@@ -675,6 +801,7 @@ ${formatTimings(timings, latencyMs, answered)}` }
       askSoon($)
     }
     await update($, lingering, () => true)
+    await syncState($)
     linger?.cancel()
     linger = $.clock.after(LINGER_MS, () => endLinger($))
     return done
@@ -686,11 +813,19 @@ ${formatTimings(timings, latencyMs, answered)}` }
     // always up while on: Claude idles between turns (no Sonnet calls then) and dozes off after a while
     const isLingering = settings.showWhenIdle || (await read($, lingering))
     const isShown = isOn && !e.props.hasSurvey && rows >= MIN_ROWS && (e.props.isWorking || isLingering)
+    // between turns, with places on the ring: one of them may have the band, or the hub shows signs to them
+    const stops = await read($, ring)
+    const isBetween = stops.length > 1 && !e.props.isWorking && !(await read($, lingering))
+    const at = isBetween ? await read($, here) : null
+    const isAway = at !== null && stops.some(s => s.id === at)
 
-    if (!isShown || e.surface !== 'terminal') {
+    if (!isShown || isAway || e.surface !== 'terminal') {
       mount = null
+      stage.routeSigns = null
       return next(e)
     }
+    const route = isBetween ? routeOf(stops, null) : null
+    stage.routeSigns = route ? { left: route.left?.name ?? null, right: route.right?.name ?? null } : null
 
     // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own). A click
     // reaches it in the fullscreen terminal; anywhere, ctrl+x tab focuses the band and p presses it
@@ -702,6 +837,8 @@ ${formatTimings(timings, latencyMs, answered)}` }
         <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
         <Box flexDirection="column" paddingLeft={1}>
           <Button key={PET_KEY} plain hotkey="p" onPress={() => undefined}>♥</Button>
+          {route?.left ? <Button key={SIGN_LEFT} plain hotkey="a" onPress={() => undefined}>◂</Button> : null}
+          {route?.right ? <Button key={SIGN_RIGHT} plain hotkey="d" onPress={() => undefined}>▸</Button> : null}
         </Box>
       </Box>
     )

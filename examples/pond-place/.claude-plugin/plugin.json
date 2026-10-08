@@ -1,0 +1,7 @@
+{
+  "name": "pond-place",
+  "version": "0.1.0",
+  "description": "An example place for agent-comic: between turns Claude goes fishing at a little pond",
+  "author": { "name": "Stein" },
+  "dependencies": ["agent-comic"]
+}
