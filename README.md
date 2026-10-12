@@ -8,6 +8,7 @@ A Claude Code plugin marketplace with my mods and plugins.
 /plugin marketplace add CatraMyBeloved/catras-claude-code-collection
 /plugin install agent-comic@catras-claude-code-collection
 /plugin install cache-keepalive@catras-claude-code-collection
+/plugin install claudle@catras-claude-code-collection
 ```
 
 The repo is private, so git must be authenticated (e.g. `gh auth login`). If the SSH attempt fails,
@@ -72,11 +73,36 @@ Set the mode (`prompt` or `off`), lifetime, lead and idle cutoff with `/config`.
 Why a message and not an invisible side request: a side request (`$.model.fork`) re-sends the conversation,
 but Claude Code caches it as a separate entry, so it never kept the main conversation's cache warm in testing.
 
+### [claudle](plugins/claudle)
+
+Programming mini-games in a side pane, to play while the agent works. Claude writes every round, pitches it
+at your level and grades free-text answers.
+
+- **Six games**: Spot the Bug (type the line and what is wrong; Claude grades it 0-100), What Does It Print?,
+  Two Truths and a Lie, Real or Hallucinated? (does this API exist?), Code Review Court (rule a reviewer's
+  comment valid, nitpick or wrong) and Big-O Bingo.
+- **Adaptive**: an Elo-style rating per topic sets the level (1-10) of the next round. The next round is
+  generated while you play the current one, and the model is told your recent rounds so it does not repeat itself.
+- **Ask Claude**: a tutor in every round. Before you answer it gives hints only, never the answer; afterwards it
+  explains the concept, how to spot it in real code, and ends with a check-your-understanding question. It sees
+  the round, your answer and the conversation, and says so when a generated round was wrong.
+- **Quiz show**: an animated pixel header in the terminal (Claude as quizmaster in a spotlight: he paces while a
+  round is written, jumps under confetti when you are right, gets a rain cloud when you are not), a pixel icon
+  and color per game, XP, streaks and titles from Fresh Intern to Principal Pedant.
+- **Plays well with the agent**: a toast and a line in the pane when Claude finishes its turn; your round waits.
+- **Topics and progress** in the pane: toggle topics (JavaScript, Python, SQL, Git, Rust, Regex, Docker...) and
+  see a success rate per game and a level per topic.
+
+Click a card in fullscreen mode, or press ctrl+x tab and use the keys the pane lists. Commands: `/claudle`,
+`/claudle play <game>`, `/claudle answer <text>`, `/claudle topics a, b, c`, `/claudle stats`, `/claudle reset`.
+Set the quizmaster model (sonnet, opus or haiku) with `/config`.
+
 ## Development
 
 ```
 claude plugin validate .
 claude plugin test plugins/cache-keepalive
+claude plugin test plugins/claudle
 claude plugin test examples/pond-place
 ```
 

@@ -1,0 +1,18 @@
+{
+  "name": "claudle",
+  "version": "0.3.0",
+  "description": "Programming mini-games to play while Claude works: Spot the Bug, What Does It Print?, Two Truths and a Lie, Real or Hallucinated?, Code Review Court, Big-O Bingo",
+  "author": {
+    "name": "Stein"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Quizmaster model",
+      "description": "Which model writes and grades the rounds: sonnet (good balance), opus (most accurate, slower), or haiku (fastest, cheapest, more mistakes).",
+      "default": "sonnet",
+      "options": ["sonnet", "opus", "haiku"]
+    }
+  }
+}

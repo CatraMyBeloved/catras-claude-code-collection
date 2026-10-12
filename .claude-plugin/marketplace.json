@@ -26,6 +26,18 @@
         "ui",
         "cache"
       ]
+    },
+    {
+      "name": "claudle",
+      "source": "./plugins/claudle",
+      "description": "Programming mini-games in a side pane to play while Claude works: Spot the Bug, What Does It Print?, Two Truths and a Lie, Real or Hallucinated?, Code Review Court and Big-O Bingo, with adaptive difficulty and an Ask Claude tutor",
+      "category": "mods",
+      "tags": [
+        "mod",
+        "ui",
+        "fun",
+        "learning"
+      ]
     }
   ]
 }
