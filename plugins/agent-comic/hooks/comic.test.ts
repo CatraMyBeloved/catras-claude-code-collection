@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { ModelCompleteResult, On, RenderElement, RenderPropsOf } from 'claude-code'
 
 import { Canvas, cellText } from './canvas'
+import { chunkSvg } from './svg'
 import { buildPrompt, describeCall, varietyNotes } from './director'
 import { addTiming, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { AskState } from './pacing'
@@ -85,6 +86,37 @@ test('the band shows the stage while Claude works and while idle', async ($, on)
   const idle = await $.ui.mount({ plugin: 'agent-comic', surface: 'terminal', component: 'AbovePrompt', props: band(false) })
   expect(await idle.find({ key: 'stage' })).toBeDefined()
   await idle.unmount()
+})
+
+test('the desktop gets the band as an SVG that plays a chunk of frames', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { key: 'engine' }, 'the engine band') as RenderElement
+  })
+  const desktop = await $.ui.mount({ plugin: 'agent-comic', surface: 'desktop', component: 'AbovePrompt', props: band(true) })
+  const tree = (await desktop.drawn()) as unknown as { children: { type: string; props: { source?: string } }[] }
+  const svg = tree.children[0]!
+  expect(svg.type).toBe('Svg')
+  expect(svg.props.source!.length).toBeLessThan(131072)
+  expect(svg.props.source).toContain('<svg')
+  expect(await desktop.find({ key: 'pet' })).toBeDefined()
+  await desktop.unmount()
+})
+
+test('a pixel moving over the open sky leaves no trail in the desktop chunk', () => {
+  const a = new Canvas(4, 1)
+  const b = new Canvas(4, 1)
+  a.set(1, 0, 0xff0000)
+  b.set(2, 0, 0xff0000)
+  const svg = chunkSvg([a, b], 50)!
+  // each frame's moving pixels are their own layer, and the first is hidden when the second shows
+  const layers = svg.match(/<g visibility="[a-z]+">.*?<\/g>/g)!
+  expect(layers).toHaveLength(2)
+  expect(layers[0]).toContain('<rect x="1" y="0"')
+  expect(layers[0]).toContain('to="hidden" begin="50ms"')
+  expect(layers[1]).toContain('<rect x="2" y="0"')
+  expect(layers[1]).not.toContain('x="1"')
+  expect(layers[1]).toContain('to="visible" begin="50ms"')
 })
 
 test('long remarks are cut at a word boundary, never mid-word', async () => {

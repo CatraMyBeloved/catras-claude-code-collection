@@ -15,6 +15,8 @@ import type { Mood, Scene, Stamp } from './scene'
 import { changesLeft, followWorld, limitChanges, noChanges } from './world'
 import type { SessionWorld, WorldChangeCounts } from './world'
 import { PACES, Stage } from './stage'
+import { chunkSvg, stillSvg } from './svg'
+import type { Canvas } from './canvas'
 import type { Weather } from './stage'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
 import type { Tally } from './usage'
@@ -30,6 +32,7 @@ let settings: Settings = { model: 'sonnet', pace: 'calm', showWhenIdle: true, di
 const STILL_RUNNING_MS = 4000 // a tool running this long is told to the director before it ends
 const LINGER_MS = 25000 // the band stays this long after a turn ends
 const FRAME_MS = 50
+const CHUNK_MS = 1000
 const MAX_ROWS = 10
 const MIN_ROWS = 6
 const KEY = 'stage'
@@ -119,6 +122,8 @@ function note(line: string) {
 }
 
 function drawFrame($: EngineInterface) {
+  // while the desktop draws the band, the stage runs ahead of the clock in chunks: never step it back
+  if (desk && !mount) return
   stage.step(Date.now())
   if (!mount || isBlitting) return
   const { requestId, columns, rows } = mount
@@ -126,6 +131,45 @@ function drawFrame($: EngineInterface) {
   $.ui.blit({ requestId, key: KEY, cells: stage.frame(columns, rows) })
     .catch(() => undefined)
     .finally(() => { isBlitting = false })
+}
+
+/**
+ * The desktop (and VS Code) draw no Raster: the band is an SVG that plays a chunk of
+ * frames by itself. Once a chunk, the stage is stepped through the next one, its frames
+ * turned into one SVG, and the band redrawn with it; the stage leads the clock by up to
+ * a chunk, so what happens shows up to that much later than on the terminal.
+ */
+let desk: { requestId: string; columns: number; rows: number } | null = null
+let deskSvg: string | null = null
+let deskSize = ''
+/** 'image' draws the SVG as a picture; 'frame' in a sandboxed frame (the SMIL route the API documents). */
+let deskMode: 'image' | 'frame' = 'image'
+
+function buildChunk() {
+  if (!desk) return
+  const { columns, rows } = desk
+  const start = Math.max(Date.now(), stage.time + FRAME_MS)
+  const frames: Canvas[] = []
+  for (let t = start; t < start + CHUNK_MS; t += FRAME_MS) {
+    stage.step(t)
+    frames.push(stage.frameCanvas(columns, rows))
+  }
+  // full rate when it fits; otherwise every second frame, every third...
+  for (let every = 1; every <= frames.length; every++) {
+    const picked = frames.filter((_, i) => i % every === 0)
+    const svg = chunkSvg(picked, FRAME_MS * every)
+    if (svg) {
+      deskSvg = svg
+      return
+    }
+  }
+  deskSvg = stillSvg(frames.at(-1)!)
+}
+
+function deskTick($: EngineInterface) {
+  if (!desk || mount) return
+  buildChunk()
+  $.ui.invalidate('ui.render')
 }
 
 /** A tool still going after a few seconds (a long build, a test run) is news before its result is. */
@@ -555,13 +599,24 @@ export const register: Register = (on, options) => {
     await $.tool.register(HUB_TOOL_SPEC)
 
     $.clock.every(FRAME_MS, () => drawFrame($))
+    $.clock.every(CHUNK_MS, () => deskTick($))
+    const storedMode = await $.store.get('svgMode')
+    if (storedMode === 'image' || storedMode === 'frame') deskMode = storedMode
     $.clock.every(1000, () => direct($).catch(() => undefined))
     $.clock.every(1000, () => checkPlace($).catch(() => undefined))
 
     return next(e)
   })
 
-  on('command.run', { command: 'comic' }, async $ => {
+  on('command.run', { command: 'comic' }, async ($, e) => {
+    const [verb, mode] = e.args.trim().split(/\s+/)
+    if (verb === 'svg') {
+      if (mode !== 'image' && mode !== 'frame') return { text: `Desktop drawing: ${deskMode}. Use /comic svg image or /comic svg frame.` }
+      deskMode = mode
+      await $.store.set('svgMode', mode)
+      $.ui.invalidate('ui.render')
+      return { text: `Desktop drawing set to ${mode}.` }
+    }
     const isOn = !(await read($, enabled))
     await update($, enabled, () => isOn)
     await $.store.set('enabled', isOn)
@@ -819,8 +874,14 @@ ${formatTimings(timings, latencyMs, answered)}` }
     const at = isBetween ? await read($, here) : null
     const isAway = at !== null && stops.some(s => s.id === at)
 
-    if (!isShown || isAway || e.surface !== 'terminal') {
-      mount = null
+    const elements = $.ui.resolve(e)
+    const Svg = e.surface !== 'terminal' && 'Svg' in elements ? elements.Svg : undefined
+    if (!isShown || isAway || (e.surface !== 'terminal' && !Svg)) {
+      if (e.surface === 'terminal') mount = null
+      else {
+        desk = null
+        deskSvg = null
+      }
       stage.routeSigns = null
       return next(e)
     }
@@ -830,11 +891,32 @@ ${formatTimings(timings, latencyMs, answered)}` }
     // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own). A click
     // reaches it in the fullscreen terminal; anywhere, ctrl+x tab focuses the band and p presses it
     const columns = Math.max(20, Math.min(512, e.props.bodyColumns - 5))
-    mount = { requestId: e.requestId, columns, rows }
-    const { Box, Button, Raster } = $.ui.resolve(e)
+    const { Box, Button } = elements
+    let picture
+    if (Svg) {
+      const deskColumns = Math.min(columns, 160)
+      desk = { requestId: e.requestId, columns: deskColumns, rows }
+      const size = `${deskColumns}x${rows}`
+      if (!deskSvg || size !== deskSize) {
+        deskSize = size
+        buildChunk()
+      }
+      picture = (
+        <Svg
+          source={deskSvg!}
+          alt="A little Claude acting out what the agent is doing"
+          {...(deskMode === 'frame' ? { isInteractive: true } : {})}
+        />
+      )
+    } else {
+      if (!('Raster' in elements)) return next(e)
+      mount = { requestId: e.requestId, columns, rows }
+      const { Raster } = elements
+      picture = <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
+    }
     return (
       <Box flexDirection="row">
-        <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
+        {picture}
         <Box flexDirection="column" paddingLeft={1}>
           <Button key={PET_KEY} plain hotkey="p" onPress={() => undefined}>♥</Button>
           {route?.left ? <Button key={SIGN_LEFT} plain hotkey="a" onPress={() => undefined}>◂</Button> : null}

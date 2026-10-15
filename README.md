@@ -47,7 +47,12 @@ A pixel comic in the band above the prompt: a little Claude acts out what the ag
   Claude works the comic takes the band back. With no place installed nothing changes. How to build one:
   [EXTENDING.md](plugins/agent-comic/EXTENDING.md); a complete example is [pond-place](examples/pond-place).
 
-Commands: `/comic` (on/off), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
+- **Desktop app and VS Code**: there the band is drawn as SVG with the same pixels. Once a second the comic
+  is played a second ahead and sent as one SVG that runs its 20 frames by itself, so it shows up to a second
+  later than in the terminal. `/comic svg image` (default) draws it as a picture, `/comic svg frame` in a
+  sandboxed frame, in case a surface does not animate the picture.
+
+Commands: `/comic` (on/off, or `/comic svg image|frame`), `/comic-pet`, `/comic-hub`, `/comic-stats`, `/comic-feel <mood>`, `/comic-demo`.
 
 ### [cache-keepalive](plugins/cache-keepalive)
 

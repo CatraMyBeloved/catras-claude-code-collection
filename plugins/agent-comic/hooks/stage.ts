@@ -1545,6 +1545,16 @@ export class Stage {
 
   /** Draws the frame for a band of `columns` by `rows` and encodes it. */
   frame(columns: number, rows: number): string {
+    return this.frameCanvas(columns, rows).encode()
+  }
+
+  /** The time the stage was last stepped to. */
+  get time(): number {
+    return this.last
+  }
+
+  /** Draws the frame for a band of `columns` by `rows`. */
+  frameCanvas(columns: number, rows: number): Canvas {
     if (columns !== this.columns || rows !== this.rows) {
       this.columns = columns
       this.rows = rows
@@ -1623,7 +1633,7 @@ export class Stage {
       if (this.routeSigns) this.drawRouteSigns(c)
       for (const e of this.effects) drawEffect(c, e, now)
       if (bubble) this.drawBubble(c, bubble)
-      return c.encode()
+      return c
     }
     const seated = this.isWatching ? SIT_LIFT : 0
     c.sprite(left, top - seated, art, TINTS[pose.tint])
@@ -1700,7 +1710,7 @@ export class Stage {
 
     if (bubble) this.drawBubble(c, bubble)
 
-    return c.encode()
+    return c
   }
 
   /** Draws a prop standing on pixel row `ground` (its bottom row just above it). */
