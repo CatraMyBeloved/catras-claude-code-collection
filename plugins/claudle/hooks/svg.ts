@@ -4,7 +4,7 @@
 // recorded as frames that differ from the first and flipped through with SMIL.
 
 import type { GameId } from '../types'
-import { FRESH_MS, headerCanvas, iconCanvas, PERIOD } from './art'
+import { FRESH_MS, headerCanvas, headerRows, iconCanvas, PERIOD } from './art'
 import type { Scene } from './art'
 import { Canvas, DEFAULT } from './canvas'
 
@@ -138,4 +138,27 @@ export function headerSvg(columns: number, scene: Scene, now: number): string {
   }
 
   return canvasSvg(headerCanvas(columns, scene, now))
+}
+
+let settledSvg: { key: string; svg: string } | undefined
+
+/**
+ * `headerSvg`, but once no reaction is under way the markup no longer
+ * depends on the clock: every redraw sends the same SVG, so the desktop
+ * keeps its frame (no reload, no restarted animation) and nothing is redrawn
+ * from scratch. The loop's phase is the frame's own, which nobody can see.
+ */
+export function stableHeaderSvg(columns: number, scene: Scene, now: number): string {
+  if (scene.mood === 'correct' && now - scene.since < FRESH_MS) return headerSvg(columns, scene, now)
+  // as of time 0, a reaction that began FRESH_MS earlier is already over
+  const settled = { ...scene, since: -FRESH_MS }
+  const key = JSON.stringify([columns, settled])
+  if (settledSvg?.key !== key) settledSvg = { key, svg: headerSvg(columns, settled, 0) }
+
+  return settledSvg.svg
+}
+
+/** The markup's own size in CSS pixels. */
+export function headerPixels(columns: number): { width: number; height: number } {
+  return { width: columns * UNIT, height: headerRows(columns) * 2 * UNIT }
 }

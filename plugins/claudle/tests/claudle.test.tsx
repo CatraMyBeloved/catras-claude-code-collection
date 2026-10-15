@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { gameOf, levelFor, parseJson, pointsFor, ratingDelta, titleFor, toPuzzle } from '../hooks/games'
+import { wrapLines } from '../hooks/register'
 import type { Profile } from '../types'
 
 const PANE_PROPS = {
@@ -37,7 +38,7 @@ const SPOT_THE_BUG = {
 }
 
 /** The engine beneath the plugin: a store in memory and a scripted model. */
-function engine(on: On, replies: (prompt: string) => string) {
+function engine(on: On, replies: (prompt: string) => string | Promise<string>) {
   const stored: Record<string, unknown> = {}
   const prompts: string[] = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -53,10 +54,10 @@ function engine(on: On, replies: (prompt: string) => string) {
 
     return { value: undefined }
   })
-  on('model.complete', (_$, e) => {
+  on('model.complete', async (_$, e) => {
     prompts.push(e.prompt)
 
-    return { value: { isAnswered: true, text: replies(e.prompt), usage: USAGE } }
+    return { value: { isAnswered: true, text: await replies(e.prompt), usage: USAGE } }
   })
 
   return { stored, prompts }
@@ -75,12 +76,25 @@ async function openPane($: Engine, surface: 'terminal' | 'desktop' = 'terminal')
   return $.ui.mount({ plugin: 'claudle', surface, component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
 }
 
-/** The key of the answer button for `text`: the button itself on the terminal, the letter beside it elsewhere. */
-async function optionKey(ui: { findAll: (q: { type: 'Button' | 'Box' }) => Promise<{ key?: string; text?: string }[]> }, text: string) {
-  const button = (await ui.findAll({ type: 'Button' })).find(b => b.key?.startsWith('opt:') && b.text?.includes(text))
-  if (button) return button.key!
-  const label = (await ui.findAll({ type: 'Box' })).find(t => t.key?.startsWith('opt-text:') && t.text?.includes(text))
-  return label ? `opt:${label.key!.slice('opt-text:'.length)}` : undefined
+type Found = { key?: string; text?: string }
+type Finds = { findAll: (q: { type: 'Button' }) => Promise<Found[]> }
+
+/** Each answer's buttons by its key (`opt:2`): one on the terminal, one per line elsewhere. */
+async function optionLines(ui: Finds): Promise<Map<string, Found[]>> {
+  const options = new Map<string, Found[]>()
+  for (const b of await ui.findAll({ type: 'Button' })) {
+    const id = b.key?.match(/^opt:\d+/)?.[0]
+    if (id) options.set(id, [...(options.get(id) ?? []), b])
+  }
+
+  return options
+}
+
+/** The key of the answer whose text holds `text`. */
+async function optionKey(ui: Finds, text: string) {
+  for (const [id, lines] of await optionLines(ui)) if (lines.map(b => b.text ?? '').join(' ').includes(text)) return id
+
+  return undefined
 }
 
 test('a generated round keeps its right answer through the shuffle', () => {
@@ -349,9 +363,9 @@ test('the desktop gets the pixel art as SVG: an animated header and icons', asyn
   expect(headerSvg.props.source.length).toBeLessThan(131072)
 })
 
-test('on the desktop a long answer wraps beside its letter button instead of being cut', async ($, on) => {
+test('on the desktop a long answer wraps over buttons that all answer it', async ($, on) => {
   const long = 'If you run ./script.sh and its last line is `cd /tmp`, your interactive shell stays where it was'
-  engine(on, p =>
+  const { stored } = engine(on, p =>
     p.includes('GAME: Two Truths')
       ? JSON.stringify({ ...WHAT_PRINTS, code: undefined, options: [long, 'b claim', 'c claim'], answer: 1 })
       : scripted(p),
@@ -359,10 +373,71 @@ test('on the desktop a long answer wraps beside its letter button instead of bei
   await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
   await ui.press({ key: 'game:two-truths' })
-  const key = await optionKey(ui, 'interactive shell stays')
+  const key = await optionKey(ui, long)
   expect(key).toMatch(/^opt:\d$/)
-  const button = await ui.find({ key: key! })
-  expect(button?.text?.length).toBe(1)
-  const boxes = await ui.findAll({ type: 'Box' })
-  expect(boxes.find(b => b.key?.startsWith('opt-text:') && b.text?.includes(long))).toBeDefined()
+  // every word is on some line, and no line is longer than the pane is wide
+  const lines = (await optionLines(ui)).get(key!)!
+  expect(lines.length).toBeGreaterThan(1)
+  expect(lines.map(b => b.text).join(' ')).toBe(long)
+  for (const line of lines) expect(line.text!.length).toBeLessThanOrEqual(PANE_PROPS.bodyColumns - 7)
+  // a press on the last line answers it
+  await ui.press({ key: lines.at(-1)!.key! })
+  expect(JSON.stringify(await ui.drawn())).toContain('✗ NOT QUITE')
+  expect((stored.profile as Profile).played).toBe(1)
+})
+
+test('on the desktop Real or Hallucinated are whole buttons', async ($, on) => {
+  engine(on, p =>
+    p.includes('GAME: Real or')
+      ? JSON.stringify({ ...WHAT_PRINTS, code: 'arr.findLast(x => x > 1)', options: ['Real', 'Hallucinated'], answer: 0 })
+      : scripted(p),
+  )
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  await ui.press({ key: 'game:real-or-fake' })
+  const tree = JSON.stringify(await ui.drawn())
+  expect(tree).toContain('"key":"opt:0","label":"Real","hotkey":"a"')
+  expect(tree).not.toContain('"plain":true,"hotkey":"a"')
+  await ui.press({ key: 'opt:0' })
+  expect(JSON.stringify(await ui.drawn())).toContain('✓ CORRECT')
+})
+
+test('on the desktop the header is sized, and its markup holds still across redraws', async ($, on) => {
+  engine(on, scripted)
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  type Svg = { type: string; props: { source: string; width?: number; height?: number } }
+  const headerOf = async () => ((await ui.drawn()) as { children: Svg[] }).children[0]!
+  const first = await headerOf()
+  expect(first.props.width).toBeGreaterThan(0)
+  expect(first.props.width).toBeLessThanOrEqual(PANE_PROPS.bodyColumns * 8)
+  expect(Math.abs(first.props.height! / first.props.width! - 20 / 88)).toBeLessThan(0.01)
+  await ui.press({ key: 'topics' })
+  await ui.press({ key: 'done' })
+  expect((await headerOf()).props.source).toBe(first.props.source)
+})
+
+test('the desktop drawing does not change with focus, and names no terminal chord', async ($, on) => {
+  engine(on, scripted)
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const mount = (isFocused: boolean) =>
+    $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: { ...PANE_PROPS, isFocused } })
+  const drawnWith = async (isFocused: boolean) => {
+    const ui = await mount(isFocused)
+    const tree = JSON.stringify(await ui.drawn()).replace(/"handle":\d+/g, '')
+    await ui.unmount()
+
+    return tree
+  }
+  const focused = await drawnWith(true)
+  const unfocused = await drawnWith(false)
+  expect(unfocused).not.toContain('ctrl+x')
+  expect(unfocused).toBe(focused)
+})
+
+test('long answers wrap at word boundaries; a word longer than a line is cut', () => {
+  expect(wrapLines('one two three four', 9)).toEqual(['one two', 'three', 'four'])
+  expect(wrapLines('abcdefghijkl xy', 5)).toEqual(['abcde', 'fghij', 'kl xy'])
+  expect(wrapLines('', 5)).toEqual([''])
+  expect(wrapLines('  spaced   out  ', 20)).toEqual(['spaced out'])
 })

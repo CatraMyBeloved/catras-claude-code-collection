@@ -99,7 +99,8 @@ at your level and grades free-text answers.
 - **Topics and progress** in the pane: toggle topics (JavaScript, Python, SQL, Git, Rust, Regex, Docker...) and
   see a success rate per game and a level per topic.
 
-Click a card in fullscreen mode, or press ctrl+x tab and use the keys the pane lists. Commands: `/claudle`,
+In the terminal, click a card in fullscreen mode, or press ctrl+x tab and use the keys the pane lists; in the desktop
+app and VS Code, click, or press the key marked on a button once the pane has focus. Commands: `/claudle`,
 `/claudle play <game>`, `/claudle answer <text>`, `/claudle topics a, b, c`, `/claudle stats`, `/claudle reset`.
 Set the quizmaster model (sonnet, opus or haiku) with `/config`.
 

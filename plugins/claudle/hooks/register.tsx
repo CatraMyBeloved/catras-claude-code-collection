@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Chat, GameId, Outcome, Profile, Puzzle, View } from '../types'
 import { GAME_COLOR, header, headerRows, hex, ICON_COLUMNS, ICON_ROWS, iconCells, P } from './art'
 import type { Mood, Scene } from './art'
-import { headerSvg, iconSvg } from './svg'
+import { headerPixels, iconSvg, stableHeaderSvg } from './svg'
 import {
   emptyProfile,
   gameOf,
@@ -120,17 +120,36 @@ async function generate($: EngineInterface, id: GameId): Promise<Puzzle | undefi
   return undefined
 }
 
-function prefetch($: EngineInterface, id: GameId) {
-  if (!prefetched.has(id)) prefetched.set(id, generate($, id).catch(() => undefined))
+/** The next round of a game: the one prefetched or still being written, else a new one. */
+function nextRound($: EngineInterface, id: GameId): Promise<Puzzle | undefined> {
+  let ready = prefetched.get(id)
+  if (!ready) {
+    ready = generate($, id).catch(() => undefined)
+    prefetched.set(id, ready)
+  }
+
+  return ready
+}
+
+/** Forgets `ready` as the next round of `id`, unless something newer took its place. */
+function consume(id: GameId, ready: Promise<Puzzle | undefined>) {
+  if (prefetched.get(id) === ready) prefetched.delete(id)
 }
 
 async function startRound($: EngineInterface, id: GameId) {
   const mine = ++roundId
   await update($, view, (): View => ({ kind: 'loading', game: id, line: pick(LOADING_LINES) }))
-  const ready = prefetched.get(id)
-  prefetched.delete(id)
-  const puzzle = (await ready) ?? (await generate($, id).catch(() => undefined))
+  let ready = nextRound($, id)
+  let puzzle = await ready
+  if (!puzzle && mine === roundId) {
+    // the prefetch failed: one fresh try
+    consume(id, ready)
+    ready = nextRound($, id)
+    puzzle = await ready
+  }
+  // left for the menu meanwhile (or pressed twice): the round stays ready for next time
   if (mine !== roundId) return
+  consume(id, ready)
   if (!puzzle) {
     await update($, view, (): View => ({
       kind: 'error',
@@ -141,7 +160,23 @@ async function startRound($: EngineInterface, id: GameId) {
     return
   }
   await update($, view, (): View => ({ kind: 'question', puzzle }))
-  prefetch($, id)
+  void nextRound($, id)
+}
+
+/** Rounds already answered, given up or sent to the judge. */
+const claimed = new Set<string>()
+
+/**
+ * Claims the round for one answer: two presses before the redraw (a double
+ * click, a then b) would otherwise both score it.
+ */
+function claim(puzzle: Puzzle): boolean {
+  const id = roundOf(puzzle)
+  if (claimed.has(id)) return false
+  claimed.add(id)
+  if (claimed.size > 100) claimed.delete(claimed.values().next().value!)
+
+  return true
 }
 
 async function toMenu($: EngineInterface) {
@@ -184,14 +219,14 @@ async function finish($: EngineInterface, puzzle: Puzzle, score: number, verdict
 
 async function answerChoice($: EngineInterface, picked: number) {
   const now = await read($, view)
-  if (now.kind !== 'question' || now.puzzle.answer === undefined) return
+  if (now.kind !== 'question' || now.puzzle.answer === undefined || !claim(now.puzzle)) return
   const isRight = picked === now.puzzle.answer
   await finish($, now.puzzle, isRight ? 100 : 0, isRight ? 'Correct!' : 'Nope.', { picked })
 }
 
 async function answerText($: EngineInterface, typed: string) {
   const now = await read($, view)
-  if (now.kind !== 'question' || now.puzzle.game !== 'spot-the-bug' || typed.trim() === '') return
+  if (now.kind !== 'question' || now.puzzle.game !== 'spot-the-bug' || typed.trim() === '' || !claim(now.puzzle)) return
   const mine = roundId
   const { puzzle } = now
   await update($, view, (): View => ({ kind: 'grading', puzzle, typed }))
@@ -207,7 +242,7 @@ async function answerText($: EngineInterface, typed: string) {
 /** Reveals the answer; the round counts as a miss. */
 async function giveUp($: EngineInterface) {
   const now = await read($, view)
-  if (now.kind !== 'question') return
+  if (now.kind !== 'question' || !claim(now.puzzle)) return
   roundId++
   await finish($, now.puzzle, 0, 'You gave up. Here is what was going on.', {})
 }
@@ -318,8 +353,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('prompt.submit', async ($, e, next) => {
-    await update($, agentDone, () => false)
+  on('prompt.submit', ($, e, next) => {
+    // a write redraws the pane and hands its buttons new handles, so only write a change;
+    // beside the prompt, never in its way
+    void read($, agentDone)
+      .then(isDone => (isDone ? update($, agentDone, () => false) : undefined))
+      .catch(() => undefined)
 
     return next(e)
   })
@@ -397,12 +436,12 @@ export const register: Register = (on, options) => {
     // only the terminal paints pixels; other surfaces draw a Raster as an empty box
     const Raster = e.surface === 'terminal' && 'Raster' in elements ? elements.Raster : undefined
     const Svg = !Raster && 'Svg' in elements ? elements.Svg : undefined
-    const now: View = await read($, view)
-    const p = await read($, profile)
-    const isAgentDone = await read($, agentDone)
+    const isTerminal = e.surface === 'terminal'
+    // read together: a redraw hands every button a new handle, and a press that
+    // lands on the old drawing is dropped, so the faster a redraw, the fewer lost
+    const [now, p, isAgentDone, storedChat] = await Promise.all([read($, view), read($, profile), read($, agentDone), read($, chat)])
     const width = Math.max(24, e.props.bodyColumns)
     const isFocused = e.props.isFocused
-    const storedChat = await read($, chat)
     const talk = 'puzzle' in now ? chatFor(storedChat, now.puzzle) : undefined
     setScene(now, p, talk?.isPending ?? false)
     const Markdown = 'Markdown' in elements ? elements.Markdown : undefined
@@ -450,7 +489,7 @@ export const register: Register = (on, options) => {
             <Input
               key={askKey(c)}
               label="Ask"
-              placeholder={isAnswered ? 'Why does map pass the index to parseInt?' : 'What should I look at first?'}
+              placeholder={isAnswered ? 'Anything about this round' : 'Where should I look?'}
               submitLabel="Ask"
               onSubmit={(value: string) => void askTutor($, value)}
             />
@@ -470,12 +509,18 @@ export const register: Register = (on, options) => {
     } else if (Svg) {
       // the desktop: the same pixel art as an SVG that animates itself
       mount = null
-      // an SVG scales to the pane: always the wide layout (big logo), shrunk to fit
+      // an SVG scales to the pane: always the wide layout (big logo), shrunk to fit.
+      // Sized explicitly: unsized, the desktop's frame is 300 by 150 and letterboxes it.
       const columns = 88
+      const own = headerPixels(columns)
+      // a column of the pane is at least 7 px wide, so this never overflows it
+      const pixels = Math.min(own.width, Math.floor(width * 7))
       headerEl = (
         <Svg
-          source={headerSvg(columns, scene, Date.now())}
+          source={stableHeaderSvg(columns, scene, Date.now())}
           alt={`Claudle: ${titleFor(p.xp)}, ${p.xp} XP${p.streak > 1 ? `, streak ${p.streak}` : ''}`}
+          width={pixels}
+          height={Math.round((pixels * own.height) / own.width)}
           isInteractive
         />
       )
@@ -506,14 +551,20 @@ export const register: Register = (on, options) => {
         <Text color="success">● Claude is done and waiting for you</Text>
       </Box>
     ) : null
-    /** The keys that work here, or how to get them working while the pane lacks the keyboard. */
-    const hint = (keys: string) => (
-      <Box paddingX={1}>
-        <Text dimColor wrap="wrap">
-          {isFocused ? keys : `Click to play, or ctrl+x tab to give this pane the keyboard (${keys})`}
-        </Text>
-      </Box>
-    )
+    /**
+     * The keys that work here, or how to get them working while the pane lacks the keyboard.
+     * The terminal's alone: the other surfaces mark each button with its key, and ctrl+x tab
+     * is a terminal chord. Not drawn there, the drawing also stays the same when the pane
+     * gains or loses focus.
+     */
+    const hint = (keys: string) =>
+      isTerminal ? (
+        <Box paddingX={1}>
+          <Text dimColor wrap="wrap">
+            {isFocused ? keys : `Click to play, or ctrl+x tab to give this pane the keyboard (${keys})`}
+          </Text>
+        </Box>
+      ) : null
     const menuButton = <Button key="menu" plain hotkey="m" dimColor label="menu" onPress={() => toMenu($)} />
 
     // ── menu: a card per game; every text row of a card starts it ──
@@ -654,9 +705,14 @@ export const register: Register = (on, options) => {
               const stats = p.games[game.id]
               const rate = stats ? stats.correct / stats.played : 0
 
+              // a column of its own, not padding: spaces only line up in a monospace font
               return (
-                <Text key={`g:${game.id}`}>
-                  <Text color={hex(GAME_COLOR[game.id])}>{fit(game.name, 22)}</Text>
+                <Box key={`g:${game.id}`}>
+                  <Box width={22} flexShrink={0}>
+                    <Text color={hex(GAME_COLOR[game.id])} wrap="truncate-end">
+                      {game.name}
+                    </Text>
+                  </Box>
                   {stats ? (
                     <Text>
                       {bar(rate, 10)} <Text dimColor>{`${Math.round(rate * 100)}% of ${stats.played}`}</Text>
@@ -664,7 +720,7 @@ export const register: Register = (on, options) => {
                   ) : (
                     <Text dimColor>not played yet</Text>
                   )}
-                </Text>
+                </Box>
               )
             })}
           </Box>
@@ -672,12 +728,16 @@ export const register: Register = (on, options) => {
             <Text bold>Topics</Text>
             {ratings.length === 0 && <Text dimColor>Play a round to get rated.</Text>}
             {ratings.map(([topic, rating]) => (
-              <Text key={`t:${topic}`}>
-                {fit(topic, 22)}
-                <Text color={hex(P.leaf)}>{'●'.repeat(levelFor(rating))}</Text>
-                <Text dimColor>{'○'.repeat(10 - levelFor(rating))}</Text>
-                <Text dimColor>{`  level ${levelFor(rating)} · rating ${rating}`}</Text>
-              </Text>
+              <Box key={`t:${topic}`}>
+                <Box width={22} flexShrink={0}>
+                  <Text wrap="truncate-end">{topic}</Text>
+                </Box>
+                <Text>
+                  <Text color={hex(P.leaf)}>{'●'.repeat(levelFor(rating))}</Text>
+                  <Text dimColor>{'○'.repeat(10 - levelFor(rating))}</Text>
+                  <Text dimColor>{`  level ${levelFor(rating)} · rating ${rating}`}</Text>
+                </Text>
+              </Box>
             ))}
           </Box>
           <Box paddingX={1}>
@@ -795,6 +855,15 @@ export const register: Register = (on, options) => {
         ) : (
           <Text dimColor>Answer with /claudle answer &lt;line and what is wrong&gt;</Text>
         )
+      } else if (game.fixedOptions && !isTerminal) {
+        // native buttons: the whole button answers, not just the word inside a box
+        answers = (
+          <Box gap={1} flexWrap="wrap">
+            {game.fixedOptions.map((option, i) => (
+              <Button key={`opt:${i}`} hotkey={letters[i]!} label={option} onPress={() => answerChoice($, i)} />
+            ))}
+          </Box>
+        )
       } else if (game.fixedOptions) {
         const cell = Math.max(...game.fixedOptions.map(o => o.length)) + 2
         keys = `${game.fixedOptions.map((o, i) => `${letters[i]} ${o}`).join(' · ')} · q hint · k skip · g give up`
@@ -816,11 +885,18 @@ export const register: Register = (on, options) => {
         )
       } else {
         const inner = width - 4
+        // the desktop draws a button's label on one line and cuts the rest, so a long
+        // answer is one button per line, each answering; the first carries the key.
+        // A column is a digit wide and prose runs narrower, so lines this long fit;
+        // less the frame, its padding and the key's mark (about 3 columns)
+        const lineWidth = Math.max(12, width - 7)
         keys = 'a-d answer · q hint · k skip · g give up · m menu'
         answers = (
-          <Box flexDirection="column">
+          <Box flexDirection="column" gap={isTerminal ? 0 : 1}>
             {(puzzle.options ?? []).map((option, i) => {
               const isShort = option.length <= inner - 3
+              const press = () => answerChoice($, i)
+              const [first = '', ...rest] = wrapLines(option, lineWidth)
 
               return (
                 <Box
@@ -829,18 +905,22 @@ export const register: Register = (on, options) => {
                   borderColor={hex(SLATE)}
                   hover={{ borderColor: color }}
                   paddingX={1}
+                  flexDirection="column"
                 >
-                  {e.surface !== 'terminal' ? (
-                    // a native button draws one line and cuts the rest: the letter is the button,
-                    // the answer wraps beside it
-                    <Box gap={1} alignItems="flex-start">
-                      <Button key={`opt:${i}`} hotkey={letters[i]!} label={letters[i]!.toUpperCase()} onPress={() => answerChoice($, i)} />
-                      <Box key={`opt-text:${i}`} flexShrink={1}>
-                        <Text wrap="wrap">
-                          {option}
-                        </Text>
-                      </Box>
-                    </Box>
+                  {!isTerminal ? (
+                    [
+                      <Button key={`opt:${i}`} plain hotkey={letters[i]!} label={first} hover={{ color }} onPress={press} />,
+                      ...(rest.length > 0
+                        ? [
+                            // unkeyed, so the option's box stays the hover scope of every line
+                            <Box flexDirection="column" paddingLeft={3}>
+                              {rest.map((line, j) => (
+                                <Button key={`opt:${i}:${j + 1}`} plain label={line} hover={{ color }} onPress={press} />
+                              ))}
+                            </Box>,
+                          ]
+                        : []),
+                    ]
                   ) : isShort ? (
                     <Button
                       key={`opt:${i}`}
@@ -872,15 +952,16 @@ export const register: Register = (on, options) => {
           </Box>
           {code}
           {answers}
-          {talk && (talk.isOpen || talk.turns.length > 0) ? tutor(puzzle, false) : null}
+          {/* above the chat, which grows: reachable without scrolling to the bottom */}
           {now.kind === 'question' && (
-            <Box paddingX={1} gap={3}>
+            <Box paddingX={1} columnGap={3} flexWrap="wrap">
               <Button key="hint" plain hotkey="q" label="ask for a hint" onPress={() => openTutor($)} />
               <Button key="skip" plain hotkey="k" dimColor label="skip" onPress={() => void startRound($, puzzle.game)} />
               <Button key="giveup" plain hotkey="g" dimColor label="give up" onPress={() => giveUp($)} />
               {menuButton}
             </Box>
           )}
+          {talk && (talk.isOpen || talk.turns.length > 0) ? tutor(puzzle, false) : null}
           {now.kind === 'question' && hint(keys)}
         </Box>
       )
@@ -961,8 +1042,7 @@ export const register: Register = (on, options) => {
             {puzzle.topic} rating {ratingText} · streak {p.streak}
           </Text>
         </Box>
-        {tutor(puzzle, true)}
-        <Box paddingX={1} gap={3}>
+        <Box paddingX={1} columnGap={3} flexWrap="wrap">
           <Button
             key="next"
             variant="primary"
@@ -974,10 +1054,34 @@ export const register: Register = (on, options) => {
           <Button key="ask" plain hotkey="q" label="ask Claude" onPress={() => openTutor($)} />
           <Button key="other" plain hotkey="o" label="other game" onPress={() => toMenu($)} />
         </Box>
+        {tutor(puzzle, true)}
         {hint('Enter or n next round · q ask Claude about it · o pick another game')}
       </Box>
     )
   })
+}
+
+/** `text` broken into lines of at most `width` characters, between words where it can. */
+export function wrapLines(text: string, width: number): string[] {
+  const lines: string[] = []
+  let line: string[] = []
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const chars = [...word]
+    if (line.length > 0 && line.length + 1 + chars.length <= width) {
+      line.push(' ', ...chars)
+      continue
+    }
+    if (line.length > 0) lines.push(line.join(''))
+    line = chars
+    // a word longer than a line is cut where the line ends
+    while (line.length > width) {
+      lines.push(line.slice(0, width).join(''))
+      line = line.slice(width)
+    }
+  }
+  if (line.length > 0 || lines.length === 0) lines.push(line.join(''))
+
+  return lines
 }
 
 /** `text` cut or padded to exactly `n` columns, so a Button fills its row. */
