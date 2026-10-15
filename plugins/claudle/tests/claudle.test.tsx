@@ -441,3 +441,35 @@ test('long answers wrap at word boundaries; a word longer than a line is cut', (
   expect(wrapLines('', 5)).toEqual([''])
   expect(wrapLines('  spaced   out  ', 20)).toEqual(['spaced out'])
 })
+
+test('every desktop view starts its focus on a button, so a view change keeps the pane focused', async ($, on) => {
+  engine(on, p => (p.includes('GAME: Big-O') ? 'I would rather not.' : scripted(p)))
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  const focusStart = async () => {
+    const tree = JSON.stringify(await ui.drawn())
+    return tree.match(/"key":"([^"]+)"[^{}]*"autoFocus":true/)?.[1]
+  }
+  expect(await focusStart()).toBe('surprise')
+  await ui.press({ key: 'game:what-prints' })
+  expect(await focusStart()).toBe('hint')
+  await ui.press({ key: 'opt:0' })
+  expect(await focusStart()).toBe('next')
+  await ui.press({ key: 'other' })
+  await ui.press({ key: 'game:spot-the-bug' })
+  expect(await focusStart()).toBe('answer')
+  await ui.press({ key: 'menu' })
+  await ui.press({ key: 'game:big-o' })
+  expect(await focusStart()).toBe('retry')
+  await ui.press({ key: 'menu' })
+  await ui.press({ key: 'stats' })
+  expect(await focusStart()).toBe('done')
+})
+
+test('the terminal keeps its focus ring where it was', async ($, on) => {
+  engine(on, scripted)
+  const ui = await openPane($, 'terminal')
+  expect(JSON.stringify(await ui.drawn())).not.toContain('"autoFocus":true')
+  await ui.press({ key: 'game:what-prints' })
+  expect(JSON.stringify(await ui.drawn())).not.toContain('"autoFocus":true')
+})

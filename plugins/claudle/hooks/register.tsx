@@ -565,7 +565,18 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
       ) : null
-    const menuButton = <Button key="menu" plain hotkey="m" dimColor label="menu" onPress={() => toMenu($)} />
+    /**
+     * Every view the desktop draws starts its focus on a button. The pane counts as focused
+     * only while the focus is inside it, and a new view replaces the button that held it;
+     * with nothing to start on, the focus drops out, and the next click first focuses the
+     * pane again. That redraws it (its isFocused prop changed) and hands out new handles
+     * before the click's press arrives, and the engine drops the press: the click is lost.
+     * The terminal keeps its focus ring where it was and needs none of this.
+     */
+    const keepFocus = isTerminal ? {} : ({ autoFocus: true } as const)
+    const menuButton = (isFocusStart = false) => (
+      <Button key="menu" plain hotkey="m" dimColor label="menu" {...(isFocusStart ? keepFocus : {})} onPress={() => toMenu($)} />
+    )
 
     // ── menu: a card per game; every text row of a card starts it ──
     if (now.kind === 'menu') {
@@ -620,6 +631,7 @@ export const register: Register = (on, options) => {
               variant="primary"
               hotkey="s"
               label="Surprise me"
+              {...keepFocus}
               onPress={() => void startRound($, pick(GAMES).id)}
             />
             <Button key="topics" plain hotkey="t" label="Topics" onPress={() => show($, 'topics')} />
@@ -766,7 +778,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>Usually 5 to 20 seconds; the next round is prepared while you play.</Text>
             </Box>
           </Box>
-          <Box paddingX={1}>{menuButton}</Box>
+          <Box paddingX={1}>{menuButton(true)}</Box>
         </Box>
       )
     }
@@ -784,7 +796,7 @@ export const register: Register = (on, options) => {
           </Box>
           <Box paddingX={1} gap={3}>
             <Button key="retry" variant="primary" hotkey="r" label="Retry" autoFocus onPress={() => void startRound($, game)} />
-            {menuButton}
+            {menuButton()}
           </Box>
         </Box>
       )
@@ -837,6 +849,7 @@ export const register: Register = (on, options) => {
             <Text dimColor italic>
               The judge is reading your answer…
             </Text>
+            <Box marginTop={1}>{menuButton(true)}</Box>
           </Box>
         )
       } else if (isBug) {
@@ -955,10 +968,10 @@ export const register: Register = (on, options) => {
           {/* above the chat, which grows: reachable without scrolling to the bottom */}
           {now.kind === 'question' && (
             <Box paddingX={1} columnGap={3} flexWrap="wrap">
-              <Button key="hint" plain hotkey="q" label="ask for a hint" onPress={() => openTutor($)} />
+              <Button key="hint" plain hotkey="q" label="ask for a hint" {...keepFocus} onPress={() => openTutor($)} />
               <Button key="skip" plain hotkey="k" dimColor label="skip" onPress={() => void startRound($, puzzle.game)} />
               <Button key="giveup" plain hotkey="g" dimColor label="give up" onPress={() => giveUp($)} />
-              {menuButton}
+              {menuButton()}
             </Box>
           )}
           {talk && (talk.isOpen || talk.turns.length > 0) ? tutor(puzzle, false) : null}
