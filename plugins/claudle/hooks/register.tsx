@@ -470,7 +470,8 @@ export const register: Register = (on, options) => {
     } else if (Svg) {
       // the desktop: the same pixel art as an SVG that animates itself
       mount = null
-      const columns = Math.max(48, Math.min(96, width))
+      // an SVG scales to the pane: always the wide layout (big logo), shrunk to fit
+      const columns = 88
       headerEl = (
         <Svg
           source={headerSvg(columns, scene, Date.now())}
@@ -829,7 +830,18 @@ export const register: Register = (on, options) => {
                   hover={{ borderColor: color }}
                   paddingX={1}
                 >
-                  {isShort ? (
+                  {e.surface !== 'terminal' ? (
+                    // a native button draws one line and cuts the rest: the letter is the button,
+                    // the answer wraps beside it
+                    <Box gap={1} alignItems="flex-start">
+                      <Button key={`opt:${i}`} hotkey={letters[i]!} label={letters[i]!.toUpperCase()} onPress={() => answerChoice($, i)} />
+                      <Box key={`opt-text:${i}`} flexShrink={1}>
+                        <Text wrap="wrap">
+                          {option}
+                        </Text>
+                      </Box>
+                    </Box>
+                  ) : isShort ? (
                     <Button
                       key={`opt:${i}`}
                       plain

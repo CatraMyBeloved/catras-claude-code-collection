@@ -75,6 +75,14 @@ async function openPane($: Engine, surface: 'terminal' | 'desktop' = 'terminal')
   return $.ui.mount({ plugin: 'claudle', surface, component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
 }
 
+/** The key of the answer button for `text`: the button itself on the terminal, the letter beside it elsewhere. */
+async function optionKey(ui: { findAll: (q: { type: 'Button' | 'Box' }) => Promise<{ key?: string; text?: string }[]> }, text: string) {
+  const button = (await ui.findAll({ type: 'Button' })).find(b => b.key?.startsWith('opt:') && b.text?.includes(text))
+  if (button) return button.key!
+  const label = (await ui.findAll({ type: 'Box' })).find(t => t.key?.startsWith('opt-text:') && t.text?.includes(text))
+  return label ? `opt:${label.key!.slice('opt-text:'.length)}` : undefined
+}
+
 test('a generated round keeps its right answer through the shuffle', () => {
   for (let seed = 0; seed < 20; seed++) {
     let n = seed
@@ -116,11 +124,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await openPane($, surface)
 
     await ui.press({ key: 'game:what-prints' })
-    const options = await ui.findAll({ type: 'Button' })
-    const right = options.find(b => b.text?.includes('[object Object]'))
-    expect(right?.key).toMatch(/^opt:/)
+    const right = await optionKey(ui, '[object Object]')
+    expect(right).toMatch(/^opt:/)
 
-    await ui.press({ key: right!.key! })
+    await ui.press({ key: right! })
     const drawn = JSON.stringify(await ui.drawn())
     expect(drawn).toContain('✓ CORRECT')
     expect(drawn).toContain('JavaScript: the language that says yes to everything.')
@@ -340,4 +347,22 @@ test('the desktop gets the pixel art as SVG: an animated header and icons', asyn
   expect(headerSvg.props.isInteractive).toBe(true)
   expect(headerSvg.props.source).toContain('<animate attributeName="visibility"')
   expect(headerSvg.props.source.length).toBeLessThan(131072)
+})
+
+test('on the desktop a long answer wraps beside its letter button instead of being cut', async ($, on) => {
+  const long = 'If you run ./script.sh and its last line is `cd /tmp`, your interactive shell stays where it was'
+  engine(on, p =>
+    p.includes('GAME: Two Truths')
+      ? JSON.stringify({ ...WHAT_PRINTS, code: undefined, options: [long, 'b claim', 'c claim'], answer: 1 })
+      : scripted(p),
+  )
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  await ui.press({ key: 'game:two-truths' })
+  const key = await optionKey(ui, 'interactive shell stays')
+  expect(key).toMatch(/^opt:\d$/)
+  const button = await ui.find({ key: key! })
+  expect(button?.text?.length).toBe(1)
+  const boxes = await ui.findAll({ type: 'Box' })
+  expect(boxes.find(b => b.key?.startsWith('opt-text:') && b.text?.includes(long))).toBeDefined()
 })
