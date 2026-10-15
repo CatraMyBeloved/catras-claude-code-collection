@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Chat, GameId, Outcome, Profile, Puzzle, View } from '../types'
 import { GAME_COLOR, header, headerRows, hex, ICON_COLUMNS, ICON_ROWS, iconCells, P } from './art'
 import type { Mood, Scene } from './art'
+import { headerSvg, iconSvg } from './svg'
 import {
   emptyProfile,
   gameOf,
@@ -113,7 +114,7 @@ async function generate($: EngineInterface, id: GameId): Promise<Puzzle | undefi
   for (let attempt = 0; attempt < 2; attempt++) {
     const raw = await ask($, prompt, 1500)
     const puzzle = raw && toPuzzle(game, topic, level, raw)
-    if (puzzle) return puzzle
+    if (puzzle) return { ...puzzle, id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }
   }
 
   return undefined
@@ -148,11 +149,6 @@ async function toMenu($: EngineInterface) {
   await update($, view, (): View => ({ kind: 'menu' }))
 }
 
-async function refreshStatus($: EngineInterface) {
-  const p = await read($, profile)
-  $.ui.status(p.played === 0 ? undefined : `🎮 ${p.xp} XP${p.streak > 1 ? ` 🔥${p.streak}` : ''}`)
-}
-
 async function finish($: EngineInterface, puzzle: Puzzle, score: number, verdict: string, extra: Partial<Outcome>) {
   const before = await read($, profile)
   const rating = before.ratings[puzzle.topic] ?? START_RATING
@@ -179,7 +175,6 @@ async function finish($: EngineInterface, puzzle: Puzzle, score: number, verdict
   await update($, profile, () => after)
   await $.store.set('profile', after)
   if (titleFor(after.xp) !== titleFor(before.xp)) $.ui.toast(`Claudle: promoted to ${titleFor(after.xp)}!`)
-  await refreshStatus($)
   await update($, view, (): View => ({
     kind: 'feedback',
     puzzle,
@@ -237,7 +232,7 @@ async function show($: EngineInterface, kind: 'stats' | 'topics') {
 
 /** Which round a chat belongs to. */
 function roundOf(puzzle: Puzzle): string {
-  return `${puzzle.game}:${puzzle.topic}:${puzzle.title}`
+  return puzzle.id ?? `${puzzle.game}:${puzzle.topic}:${puzzle.title}`
 }
 
 /** The chat for the round on screen: the stored one, or a fresh one when it was about another round. */
@@ -318,7 +313,6 @@ export const register: Register = (on, options) => {
     const storedTopics = (await $.store.get('topics')) as string[] | undefined
     if (storedProfile) await update($, profile, () => ({ ...emptyProfile(), ...storedProfile }))
     if (storedTopics?.length) await update($, topics, () => storedTopics)
-    await refreshStatus($)
     $.clock.every(120, () => drawFrame($))
 
     return next(e)
@@ -389,7 +383,6 @@ export const register: Register = (on, options) => {
     if (verb === 'reset') {
       await update($, profile, () => emptyProfile())
       await $.store.set('profile', emptyProfile())
-      await refreshStatus($)
 
       return { text: 'Claudle progress reset.' }
     }
@@ -403,6 +396,7 @@ export const register: Register = (on, options) => {
     const Input = 'Input' in elements ? elements.Input : undefined
     // only the terminal paints pixels; other surfaces draw a Raster as an empty box
     const Raster = e.surface === 'terminal' && 'Raster' in elements ? elements.Raster : undefined
+    const Svg = !Raster && 'Svg' in elements ? elements.Svg : undefined
     const now: View = await read($, view)
     const p = await read($, profile)
     const isAgentDone = await read($, agentDone)
@@ -473,6 +467,17 @@ export const register: Register = (on, options) => {
       headerEl = (
         <Raster key={HEADER} columns={columns} rows={headerRows(columns)} cells={header(columns, scene, Date.now())} />
       )
+    } else if (Svg) {
+      // the desktop: the same pixel art as an SVG that animates itself
+      mount = null
+      const columns = Math.max(48, Math.min(96, width))
+      headerEl = (
+        <Svg
+          source={headerSvg(columns, scene, Date.now())}
+          alt={`Claudle: ${titleFor(p.xp)}, ${p.xp} XP${p.streak > 1 ? `, streak ${p.streak}` : ''}`}
+          isInteractive
+        />
+      )
     } else {
       mount = null
       headerEl = (
@@ -486,10 +491,12 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const iconWidth = Raster ? ICON_COLUMNS : 1
+    const iconWidth = Raster || Svg ? ICON_COLUMNS : 1
     const icon = (id: GameId, key: string) =>
       Raster ? (
         <Raster key={key} columns={ICON_COLUMNS} rows={ICON_ROWS} cells={iconCells(id)} />
+      ) : Svg ? (
+        <Svg source={iconSvg(id)} alt={gameOf(id).name} width={48} height={36} />
       ) : (
         <Text color={hex(GAME_COLOR[id])}>■</Text>
       )
@@ -783,7 +790,6 @@ export const register: Register = (on, options) => {
               autoFocus
               onSubmit={(value: string) => void answerText($, value)}
             />
-            <Text dimColor>Name the line and what is wrong; the explanation earns the points.</Text>
           </Box>
         ) : (
           <Text dimColor>Answer with /claudle answer &lt;line and what is wrong&gt;</Text>

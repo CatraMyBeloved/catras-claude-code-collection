@@ -159,14 +159,16 @@ test('Spot the Bug: a typed answer is graded by the model', async ($, on) => {
   expect((stored.profile as Profile).correct).toBe(1)
 })
 
-test('the pane draws the pixel header and game icons on the terminal, text elsewhere', async ($, on) => {
+test('the terminal draws pixel cells, the desktop and VS Code the same art as SVG', async ($, on) => {
   engine(on, scripted)
   const terminal = await openPane($, 'terminal')
   expect(await terminal.find({ key: 'header' })).toBeDefined()
   expect(await terminal.find({ key: 'icon:big-o' })).toBeDefined()
   const desktop = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
   expect(await desktop.find({ key: 'header' })).toBeUndefined()
-  expect(JSON.stringify(await desktop.drawn())).toContain('CLAUDLE')
+  expect(JSON.stringify(await desktop.drawn())).toContain('Claudle: Fresh Intern')
+  const vscode = await $.ui.mount({ plugin: 'claudle', surface: 'vscode', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  expect(JSON.stringify(await vscode.drawn())).toContain('Claudle: Fresh Intern')
 })
 
 test('the next round was prefetched while the first was played', async ($, on) => {
@@ -324,4 +326,18 @@ test('a new round starts a fresh conversation', async ($, on) => {
   await ui.press({ key: 'giveup' })
   expect(JSON.stringify(await ui.drawn())).not.toContain('› explain please')
   expect(await ui.find({ key: 'ask:0' })).toBeDefined()
+})
+
+test('the desktop gets the pixel art as SVG: an animated header and icons', async ($, on) => {
+  engine(on, scripted)
+  await $.session.start({ cwd: 'C:/projects', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'claudle', surface: 'desktop', component: 'Pane', requestId: 'claudle', props: PANE_PROPS })
+  const svgs = await ui.findAll({ type: 'Svg' })
+  expect(svgs.length).toBe(7)
+  const tree = (await ui.drawn()) as { children: { type: string; props: { source: string; isInteractive?: boolean } }[] }
+  const headerSvg = tree.children[0]!
+  expect(headerSvg.type).toBe('Svg')
+  expect(headerSvg.props.isInteractive).toBe(true)
+  expect(headerSvg.props.source).toContain('<animate attributeName="visibility"')
+  expect(headerSvg.props.source.length).toBeLessThan(131072)
 })

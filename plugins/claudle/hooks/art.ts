@@ -58,10 +58,14 @@ export const ICON_COLUMNS = 8
 export const ICON_ROWS = 3
 
 export function iconCells(id: GameId): string {
+  return iconCanvas(id).encode()
+}
+
+export function iconCanvas(id: GameId): Canvas {
   const c = new Canvas(ICON_COLUMNS, ICON_ROWS)
   c.sprite(0, 0, ICONS[id].rows, ICONS[id].palette)
 
-  return c.encode()
+  return c
 }
 
 // ── Logo font: 3 by 5, scaled ──────────────────────────────────────────
@@ -83,7 +87,7 @@ export function logoWidth(scale: number): number {
 
 function drawLogo(c: Canvas, x: number, y: number, scale: number, t: number) {
   // a highlight sweeps across the letters every few seconds
-  const sweep = ((t / 40) % (logoWidth(scale) + 80)) - 20
+  const sweep = ((t % 4800) / 4800) * (logoWidth(scale) + 80) - 20
   ;[...LOGO].forEach((letter, i) => {
     const glyph = FONT[letter]!
     for (let r = 0; r < 5; r++) {
@@ -175,8 +179,21 @@ export function headerRows(columns: number): number {
   return columns >= 78 ? 10 : 6
 }
 
-/** One frame of the header at time `t` (ms). */
+/**
+ * Every looping motion of the header repeats within this many ms, so a
+ * recorded loop of it (the desktop's SVG) has no seam.
+ */
+export const PERIOD = 9600
+/** How long a reaction (the jump and confetti of a right answer) plays before it settles. */
+export const FRESH_MS = 2600
+
+/** One frame of the header at time `t` (ms), as Raster cells. */
 export function header(columns: number, scene: Scene, t: number): string {
+  return headerCanvas(columns, scene, t).encode()
+}
+
+/** One frame of the header at time `t` (ms). */
+export function headerCanvas(columns: number, scene: Scene, t: number): Canvas {
   const rows = headerRows(columns)
   const isBig = rows === 10
   const c = new Canvas(columns, rows)
@@ -188,7 +205,7 @@ export function header(columns: number, scene: Scene, t: number): string {
   for (let i = 0; i < Math.floor(columns / 5); i++) {
     const sx = Math.floor(hash(i) * columns)
     const sy = Math.floor(hash(i + 99) * (h - 4))
-    const tw = Math.sin(t / 400 + i * 1.7)
+    const tw = Math.sin((2 * Math.PI * t) / 2400 + i * 1.7)
     if (tw > 0.3) c.set(sx, sy, tw > 0.85 ? P.white : P.steel)
   }
 
@@ -212,12 +229,12 @@ export function header(columns: number, scene: Scene, t: number): string {
   let front: ArmPose = 'down'
   let lift = 0
   let step = 0
-  const isBlink = t % 3800 < 140
-  const fresh = age < 2600
+  const isBlink = t % 3200 < 140
+  const fresh = age < FRESH_MS
   switch (scene.mood) {
     case 'idle':
       face = isBlink ? 'blink' : 'ahead'
-      front = t % 9000 < 1200 ? 'up' : 'down' // a wave now and then
+      front = t % PERIOD < 1200 ? 'up' : 'down' // a wave now and then
       break
     case 'watching':
       face = isBlink ? 'blink' : 'focused'
@@ -270,7 +287,7 @@ export function header(columns: number, scene: Scene, t: number): string {
     const cloudY = Math.max(0, figY - 5)
     scaled(c, cloudX, cloudY, ['..mmmm..', '.mmmmmm.', 'mmmmmmmm', '.ssssss.'], { m: P.steel, s: P.slate }, 1)
     for (let i = 0; i < 4; i++) {
-      const dropY = cloudY + 4 + ((Math.floor(t / 90) + i * 3) % 6)
+      const dropY = cloudY + 4 + ((Math.floor(t / 100) + i * 3) % 6)
       if (dropY < figY + 1) c.set(cloudX + 1 + i * 2, dropY, P.sky)
     }
   }
@@ -297,7 +314,7 @@ export function header(columns: number, scene: Scene, t: number): string {
   put(' ' + xpText, P.mist)
   if (scene.streak > 1) put(`  x${scene.streak} streak`, P.coral)
 
-  return c.encode()
+  return c
 }
 
 export { DEFAULT }

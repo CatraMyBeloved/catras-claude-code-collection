@@ -88,7 +88,8 @@ at your level and grades free-text answers.
   the round, your answer and the conversation, and says so when a generated round was wrong.
 - **Quiz show**: an animated pixel header in the terminal (Claude as quizmaster in a spotlight: he paces while a
   round is written, jumps under confetti when you are right, gets a rain cloud when you are not), a pixel icon
-  and color per game, XP, streaks and titles from Fresh Intern to Principal Pedant.
+  and color per game, XP, streaks and titles from Fresh Intern to Principal Pedant. In the desktop app and VS Code
+  the same pixel art is drawn as SVG that animates itself.
 - **Plays well with the agent**: a toast and a line in the pane when Claude finishes its turn; your round waits.
 - **Topics and progress** in the pane: toggle topics (JavaScript, Python, SQL, Git, Rust, Regex, Docker...) and
   see a success rate per game and a level per topic.

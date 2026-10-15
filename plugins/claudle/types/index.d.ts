@@ -2,6 +2,8 @@ export type GameId = 'spot-the-bug' | 'what-prints' | 'two-truths' | 'real-or-fa
 
 /** One generated round, as the pane shows it. */
 export type Puzzle = {
+  /** Unique per generated round; the Ask Claude chat is keyed on it. */
+  id?: string
   game: GameId
   topic: string
   level: number
