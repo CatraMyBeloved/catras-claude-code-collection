@@ -1,7 +1,7 @@
 // Dry run of the director: feeds a simulated session through the real prompt and
 // variety notes, scene after scene, via `claude -p` on Sonnet. Prints each scene briefly.
 //   bun dev/director-trial.ts
-import { SYSTEM, buildPrompt, varietyNotes } from '../hooks/director'
+import { SYSTEM, buildPrompt, varietyNotes } from '../hooks/prompt'
 import { parseScene } from '../hooks/scene'
 import type { Scene } from '../hooks/scene'
 import { Stage } from '../hooks/stage'

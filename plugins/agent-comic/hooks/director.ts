@@ -1,212 +1,402 @@
-// What the director tells Sonnet, and how the agent's activity is summarized for it.
+// The director: what the agent does each turn goes into a log, and about when the stage runs dry the
+// next scene is asked of the model (or, as /config's director setting has it, taken from the canned
+// library) and queued on the stage. The session's world is set up by its first scene and carried from
+// turn to turn; only the director changes it, within the session's limits.
 
-import { HATS, MOODS, PROP_KINDS, SETTINGS } from './scene'
-import type { Scene } from './scene'
+import type { EngineInterface, ModelUsage } from 'claude-code'
 
-export const SYSTEM = `You are the director of a tiny animated comic strip shown in a terminal while an AI coding agent works.
-The star is the agent itself: a small orange pixel creature ("Claude") who walks around a little world, inspects things and remarks on what it finds.
-Each time you are called you get a log of what the agent just did (files read, commands run, searches, its own remarks) and you stage ONE short scene (about 6-15 seconds) that turns the latest activity into a visual metaphor.
+import { weatherAt } from './activity'
+import { cannedFirst, cannedInterlude, cannedScene, cannedWrap } from './canned'
+import type { Activity } from './canned'
+import { cellText } from './canvas'
+import { MAX_INTERLUDES, addTiming, blendLatency, emptyTimings, formatTimings, nextAsk } from './pacing'
+import { pats } from './pets'
+import { SYSTEM, buildPrompt, varietyNotes } from './prompt'
+import { settings, stage } from './runtime'
+import { clip, parseScene } from './scene'
+import type { Scene, Setting, Stamp } from './scene'
+import type { StageWorld } from './stage'
+import { isEnabled } from './state'
+import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
+import { changesLeft, followWorld, limitChanges, noChanges } from './world'
+import type { SessionWorld } from './world'
 
-Reply with ONLY a JSON object, no prose, no code fence:
-{
-  "setting": one of ${SETTINGS.map(s => `"${s}"`).join(', ')},
-  "mood": one of ${MOODS.map(m => `"${m}"`).join(', ')}   (Claude's mood for the whole scene),
-  "hat": one of ${HATS.map(h => `"${h}"`).join(', ')}   (first scene of the session only; later, change it with the hat beat),
-  "props": [ { "id": "short-id", "kind": one of ${PROP_KINDS.map(k => `"${k}"`).join(', ')}, "x": 0-100, "label": "optional, max 22 chars" } ],
-  "beats": [ ... ]
+const STILL_RUNNING_MS = 4000 // a tool running this long is told to the director before it ends
+const LOG_LINES = 40
+const RECENT_SCENES = 6 // for the variety notes
+const MAX_GOAL = 300
+
+/** The turn under way: what the person asked, and what the agent has done. */
+const turn = {
+  goal: null as string | null,
+  log: [] as string[],
+  /** Log lines not staged yet, and when the oldest of them happened. */
+  fresh: 0,
+  firstFreshAt: undefined as number | undefined,
+  lastActivity: 0,
+  isRunning: false,
+  /** Its first scene is still to be staged: the model stages it, in the session's world. */
+  isOpening: false,
+  isWrapPending: false,
+  /** Interludes asked for since the last new activity. */
+  interludes: 0,
+  /** What the agent did since the last staged scene, for canned scenes. */
+  acts: [] as Activity[],
+  /** The agent's latest remark to the person. */
+  lastSaid: undefined as string | undefined,
 }
 
-Beats run in order:
-  {"do":"walk","to":0-100}   {"do":"run","to":0-100}   (run kicks up dust: urgency, excitement)
-  {"do":"look","at":"<prop id>","react":"!" or "?"}   (walks over to the prop by itself)
-  {"do":"say","text":"aim for 40-80 chars, never over 100"}
-  {"do":"think","text":"aim for 40-80 chars, never over 100"}
-  {"do":"emote","mood":"<mood>","secs":2}   (a passing feeling: surprised at a find, worried at a risk, angry at a failure, love for nice code)
-  {"do":"read","secs":3}   (holds an open book: reading files or docs)
-  {"do":"type","at":"<computer prop id>"}   (walks to it and types: running commands, editing)
-  {"do":"carry","at":"<prop id>"} then later {"do":"drop"}   (lifts a prop overhead and sets it down where Claude stands: moving or refactoring)
-  {"do":"plant_sign","label":"max 22 chars","x":0-100,"id":"optional short id"}   (hammers a new sign into the ground: mark a finding, a file, a TODO)
-  {"do":"pull_sign","at":"<sign id>"}   (pulls a sign out of the ground and it vanishes: done, fixed, or wrong after all)
-  {"do":"ponder","secs":3}   (stands and contemplates: a "..." bubble, looks one way, then the other)
-  {"do":"transform","at":"<prop id>","into":"<prop kind>","label":"optional"}   (lifts it overhead, a puff of magic smoke, it becomes the new thing for good)
-  {"do":"hat","hat":"<hat>"}   (a puff over his head and he wears another hat, for good)
-  {"do":"travel","setting":"<setting>","props":[{"kind":"<prop kind>","label":"optional"}, ... up to 4],"hat":"optional"}
-      (a door appears, he walks through it into new scenery with these props; always the LAST beat of its scene)
-  {"do":"dance"}  {"do":"wave"}  {"do":"shrug"}  {"do":"dig"}  {"do":"jump"}  {"do":"celebrate"}  {"do":"wait","secs":1}
+/** The session's world: set up by its first scene, then changed only by the director, now and then. */
+const session = {
+  world: null as SessionWorld | null,
+  /** The settings it has been in, oldest first. */
+  settings: [] as Setting[],
+  /** The stage shows it (not the hub, not the demo's world). */
+  isWorldShown: false,
+  /** What the director changed of it so far. */
+  changes: noChanges(),
+}
 
-Guidelines:
-- Unhurried. HARD LIMIT: 7 beats per scene (9 for an interlude); 5 is often best. At most 4 props, one idea per scene. Claude is calm and thoughtful,
-  not busy: after picking something up, putting it down or finding something, give him a moment (ponder, wait, or a short emote)
-  before the next thing. Fewer, deliberate actions beat many quick ones.
-- Spread props out (x values at least 15 apart). Leave room near x=0 where Claude may stand.
-- Whimsy over literalness: this is a storybook world, not an office. For each piece of work pick a surprising but fitting metaphor in any setting.
-  The obvious one (a library for reading code) is allowed only now and then. Ideas, each one of many:
-  reading or exploring code: a forest of signposts named after the files; beachcombing scrolls washed up by the sea; lamp-lit inscriptions in a cave; a sign on the moon.
-  searching: digging for a chest in the desert or on the beach; lifting rocks to peek under them; hunting with a lamp at night.
-  running commands or tests: typing at a computer planted somewhere odd (a dune, the moon, a beach) and waiting for its verdict.
-  a bug or an error: a bug crawls out from behind a crate, rock or mushroom; Claude jumps back, surprised or worried.
-  fixing it: stand over the bug and cheer; or carry the crate it hid behind to a better spot.
-  writing or editing files: stacking crates, carrying a scroll to its sign, planting a flag.
-  refactoring or moving code: carrying props from one place to another and setting them down in a new order.
-  web research: a scroll from the sea, a signal from a far planet.  a long wait: night, a lamp, sitting by a mushroom, dozing.
-- One world per session, and you own it. The session's FIRST scene sets it up: a setting, a hat and exactly 4 props that belong
-  together as one small place (a desert dig site: cactus, chest, rock, a sign; a night camp: lamp, crate, scroll, flag). Pick a
-  place that can hold a whole session of work. Every later scene gets the world as it now is in the request: do not send "props"
-  or "hat" then, refer to the props by their ids. Carrying a prop to another spot is fine; squashing is not (props never vanish).
-- Change the world rarely, as a beat of the story, when the WORK changes, never just for variety:
-  transform a prop when the kind of work shifts (a scroll becomes a computer as reading turns into running tests; a crate
-  becomes a chest once the bug is found); hat when the session's spirit changes (tophat for a finished feature, nightcap for
-  a long slog, miner when the digging starts); travel only when the session moves on to clearly different work, and only at a
-  turn's start or end. Most scenes change nothing. The request says how many changes are left this session; never use more.
-- Signs are notes in the world, on top of the 4 props: when something concrete is found (a cause, a number, a file, a TODO),
-  plant_sign it right there with a short label (aim for 14 characters or fewer: long boards crowd the strip);
-  pull_sign one that is done or turned out wrong. At most 2 planted signs stand at once; they stay until pulled.
-- A hat fits the place and the spirit of the work: wizard (library, night, space, deep reading),
-  miner (cave, digging, searching), straw (beach, desert, meadow), tophat (a proud or festive moment), nightcap (night, long waits),
-  or none. It stays on until a hat beat changes it.
-- A "sign" shows its label on a board: use it for file names, commands, or search terms the agent is working on (e.g. "auth.ts", "npm test").
-- Props are toys, not scenery: every scene has at least TWO interactions with its props (look at, carry and drop, type at, dig beside),
-  ideally a tiny story: find something, react to it, do something about it.
-- Use "read" at most once per scene, and not in two scenes in a row. Prefer carry, drop, type, dig, run and the gestures.
-- The setting is chosen once per session: its first scene picks it, every later scene stays in it.
-  Vary the moods, actions and stories instead. Follow the variety notes in each request.
-- Give Claude feelings: pick a scene mood that fits the work, and use at least one emote, action or gesture (wave, shrug, dance) per scene so the strip stays lively. Vary them between scenes.
-- Speech is Claude remarking on REAL findings from the log: concrete, short, a little witty, first person. Never invent facts that are not in the log.
-- Continuity lives in the story: the place and its props carry over from turn to turn, so new turns can call back to earlier ones.`
+/** The director's own bookkeeping. */
+const desk = {
+  /** Bumped by each new turn (and each new place): an answer asked for an older one is dropped. */
+  epoch: 0,
+  /** The epoch of the request under way, if any. */
+  askingIn: null as number | null,
+  lastAsk: 0,
+  /** Requests in a row that brought no scene, and the back-off after them. */
+  failures: 0,
+  retryAfter: 0,
+  /** While the demo or a /comic-feel plays, the director waits. */
+  pausedUntil: 0,
+  hasLoggedError: false,
+  previous: null as Scene | null,
+  recent: [] as Scene[],
+  /** The model's recent answer time; the first answers correct it. */
+  latencyMs: 7000,
+  timings: emptyTimings(),
+  tally: emptyTally(),
+  /** Scenes the model handed over this session. */
+  answered: 0,
+}
 
-export function buildPrompt(args: {
-  goal: string | null
-  log: readonly string[]
+/** The main thread's tool calls under way, to tell the director about long ones before they end. */
+const running = new Map<string, { what: string; since: number; isTold: boolean }>()
+
+/** What a request is for, and what it was asked with. */
+type Request = {
+  kind: Stamp['kind']
+  /** The session's world as the stage has it; none before the session's first scene. */
+  world: StageWorld | undefined
+  isInterlude: boolean
+  isTurnOpening: boolean
+  /** The activity it stages, for canned scenes; and the log lines not staged before it. */
+  acts: Activity[]
   fresh: number
-  previous: Scene | null
-  finished: boolean
-  interlude?: { n: number; quietSecs: number; isLast: boolean }
-  variety?: Variety
-  world?: { setting: string; props: readonly { id: string; kind: string; label?: string; x: number }[]; gone: readonly string[]; hat?: string }
-  /** World changes the director may still make this session. */
-  changesLeft?: { transform: number; hat: number; travel: number }
-}): string {
-  const older = args.log.slice(0, Math.max(0, args.log.length - args.fresh))
-  const latest = args.log.slice(Math.max(0, args.log.length - args.fresh))
-  const parts = [
-    `The person asked the agent: ${args.goal ?? '(unknown)'}`,
-    older.length ? `Earlier activity:\n${older.slice(-12).join('\n')}` : '',
-    args.interlude
-      ? interludeAsk(args.interlude)
-      : `Latest activity (stage THIS):\n${latest.join('\n') || '(the agent is thinking)'}`,
-    args.previous
-      ? `Previous scene: setting=${args.previous.setting}, mood=${args.previous.mood}, props=${args.previous.props.map(p => `${p.kind}${p.label ? `(${p.label})` : ''}`).join(', ') || 'none'}`
-      : 'This is the first scene.',
-    args.world ? worldAsk(args.world, args.changesLeft) : 'This is the FIRST scene of the session: set up its world (setting, hat and 4 related props). It carries over to every later turn.',
-    args.variety ? varietyAsk(args.variety, Boolean(args.interlude)) : '',
-    args.finished
-      ? 'The agent has just FINISHED its turn. Stage a short wrap-up scene: Claude sums up the outcome in one remark and celebrates or shrugs as fits.'
-      : '',
-  ]
-  return parts.filter(Boolean).join('\n\n')
+  /** When its oldest activity happened, and what the stage expected to have left as it was asked. */
+  activity: number | undefined
+  expectedLeftMs: number
 }
 
-/** What the recent scenes leaned on, so the next one can lean elsewhere. */
-export type Variety = { recentSettings: string[]; overused: string[]; suggest: string; banned?: string; locked?: string }
-
-/**
- * Reads the last few scenes for the actions they used most, and the settings of
- * recent turns (`settings`, oldest first; the scenes' own when absent) for a setting to try.
- * `locked` is the session's setting once its first scene picked one.
- */
-export function varietyNotes(
-  recent: readonly Scene[],
-  rand: () => number = Math.random,
-  settings?: readonly string[],
-  locked?: string,
-): Variety {
-  const recentSettings = [...(settings ?? recent.map(s => s.setting))]
-  const counts = new Map<string, number>()
-  for (const scene of recent.slice(-4)) for (const b of scene.beats) counts.set(b.do, (counts.get(b.do) ?? 0) + 1)
-  const overused = [...counts].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([act, n]) => `${act} x${n}`)
-  const lately = new Set(recentSettings.slice(-3))
-  const fresh = SETTINGS.filter(s => !lately.has(s))
-  const pool = fresh.length ? fresh : [...SETTINGS]
-  const suggest = pool[Math.floor(rand() * pool.length)]!
-  const [a, b] = recentSettings.slice(-2)
-  return { recentSettings, overused, suggest, banned: a !== undefined && a === b ? a : undefined, locked }
-}
-
-function varietyAsk(v: Variety, isInterlude: boolean): string {
-  const lines = ['Variety notes:']
-  if (v.locked) {
-    lines.push(`- the setting is fixed for this session: "${v.locked}". Stay in it; vary mood, actions and stories instead`)
-  } else {
-    if (v.recentSettings.length) lines.push(`- settings of recent turns, oldest first: ${v.recentSettings.join(', ')}`)
-    lines.push('- this is the first scene of the session: it picks the setting for the whole session')
+/** Sets the director up as the module loads: its first latency guess, and what it learns from the stage. */
+export function startDirector() {
+  desk.latencyMs = settings.model === 'haiku' ? 4000 : 7000
+  stage.onPlay = scene => {
+    if (scene.stamp) desk.timings = addTiming(desk.timings, scene.stamp, Date.now())
   }
-  if (!isInterlude && !v.locked) {
-    lines.push(`- suggested setting this time: ${v.suggest} (use it unless it truly cannot fit the work)`)
-    if (v.banned) lines.push(`- do NOT use "${v.banned}" this time: the last two turns used it`)
-  }
-  if (v.overused.length) lines.push(`- used a lot lately, so go easy on them: ${v.overused.join(', ')}`)
-  return lines.join('\n')
-}
-
-function worldAsk(w: NonNullable<Parameters<typeof buildPrompt>[0]['world']>, left?: { transform: number; hat: number; travel: number }): string {
-  const props = w.props.map(p => `${p.id} = ${p.kind}${p.label ? ` "${p.label}"` : ''} at x=${p.x}`).join('; ')
-  const world = `The world as it is now (do NOT send "props" or "hat"): setting ${w.setting}; Claude wears: ${w.hat ?? 'none'}; props: ${props || 'none left'}` +
-    (w.gone.length ? `; gone: ${w.gone.join(', ')}` : '') + '. Use these ids.'
-  if (!left) return world
-  return `${world}
-World changes left this session (use only when the work really changes): transform ${left.transform}, hat ${left.hat}, travel ${left.travel}.`
-}
-
-/** What to stage when nothing new has happened for a while but the agent is still at work. */
-function interludeAsk(i: { n: number; quietSecs: number; isLast: boolean }): string {
-  if (i.isLast) {
-    return `No new activity for ${i.quietSecs}s; the agent is still busy. Stage a short scene in the same setting where Claude, ` +
-      'still waiting, grows drowsy: a yawn-like remark, then {"do":"emote","mood":"sleepy","secs":4}. Invent no findings.'
-  }
-  return `INTERLUDE ${i.n}: no new activity for ${i.quietSecs}s, but the agent is still working (thinking, or a long command). ` +
-    "Continue the previous scene's story in the same setting with 5-8 unhurried beats, pauses included (ponder, wait), so the strip does not stall: Claude keeps busy - " +
-    'rereading or pacing, typing, carrying something, thinking aloud about what IS in the log, a small gesture, a light joke about the wait. ' +
-    'Chain varied actions. Invent no findings and do not repeat the previous remarks.'
-}
-
-const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/\s+/g, ' ')
-
-/** One log line for a tool call, from its input and how it ended. */
-export function describeCall(e: Record<string, unknown>, outcome: { isError?: boolean; deny?: string; result?: unknown }): string {
-  const tool = String(e.tool)
-  const s = (k: string) => (typeof e[k] === 'string' ? (e[k] as string) : '')
-  let what: string
-  switch (tool) {
-    case 'Read': what = `read ${s('file_path')}`; break
-    case 'Edit': what = `edited ${s('file_path')}`; break
-    case 'Write': what = `wrote ${s('file_path')}`; break
-    case 'Bash': what = `ran \`${cut(s('command'), 80)}\``; break
-    case 'Grep': what = `searched for "${cut(s('pattern'), 40)}"${s('path') ? ` in ${s('path')}` : ''}`; break
-    case 'Glob': what = `listed files matching ${s('pattern')}`; break
-    case 'WebFetch': what = `fetched ${s('url')}`; break
-    case 'WebSearch': what = `searched the web for "${cut(s('query'), 50)}"`; break
-    case 'Agent': what = `sent a helper agent: ${cut(s('description') || s('prompt'), 60)}`; break
-    default: {
-      const args = JSON.stringify(Object.fromEntries(Object.entries(e).filter(([k]) => !['tool', 'tool_use_id', 'agentId'].includes(k))))
-      what = `used ${tool} ${cut(args ?? '', 70)}`
+  // what plays is what the session keeps: a transformed prop, a new hat, new scenery
+  stage.onWorldChange = shown => {
+    if (!session.isWorldShown || !session.world) return
+    const { world, moved } = followWorld(session.world, shown)
+    session.world = world
+    if (moved) {
+      session.settings = [...session.settings, world.setting].slice(-RECENT_SCENES)
+      desk.epoch++ // what was being staged for the old place is dropped
     }
   }
-  if (e.agentId) what = `(helper) ${what}`
-  if (outcome.deny) return `${what} -> blocked`
-  const result = summarize(outcome.result)
-  if (outcome.isError) return `${what} -> FAILED${result ? `: ${result}` : ''}`
-  return result ? `${what} -> ${result}` : what
 }
 
-function summarize(result: unknown): string {
-  if (result === undefined || result === null) return ''
-  let text: string
-  if (typeof result === 'string') text = result
-  else {
-    const r = result as Record<string, unknown>
-    text = typeof r.stdout === 'string' || typeof r.stderr === 'string'
-      ? `${r.stdout ?? ''} ${r.stderr ?? ''}`
-      : typeof r.content === 'string' ? r.content : (JSON.stringify(result) ?? '')
+/** A turn is under way (not the answer to a pat). */
+export function isTurnRunning(): boolean {
+  return turn.isRunning
+}
+
+/** A line for the director's log: new activity. */
+export function note(line: string) {
+  turn.log.push(line)
+  turn.log = turn.log.slice(-LOG_LINES)
+  if (turn.fresh === 0) turn.firstFreshAt = Date.now()
+  turn.fresh++
+  turn.lastActivity = Date.now()
+  turn.interludes = 0
+}
+
+/** An activity for the canned scenes. */
+export function act(a: Activity) {
+  turn.acts.push(a)
+}
+
+/** The agent said something to the person: the director hears it, and canned scenes may repeat it. */
+export function heard(text: string) {
+  note(`the agent said: ${text.slice(0, 220)}`)
+  turn.lastSaid = clip(cellText(text), 120)
+  act({ kind: 'said', text: clip(cellText(text), 60) })
+}
+
+/** A main-thread tool call began; a long one is told before it ends. */
+export function toolStarted(id: string, what: string) {
+  running.set(id, { what, since: Date.now(), isTold: false })
+}
+
+export function toolEnded(id: string) {
+  running.delete(id)
+}
+
+/** A new turn: the person asked for `text`. The session's world carries on; only the first turn sets one up. */
+export function beginTurn($: EngineInterface, text: string) {
+  stage.attention = null
+  desk.epoch++
+  desk.retryAfter = 0
+  desk.lastAsk = 0
+  turn.goal = text.slice(0, MAX_GOAL)
+  turn.log = []
+  turn.acts = []
+  turn.lastSaid = undefined
+  turn.fresh = 0
+  turn.isWrapPending = false
+  turn.isRunning = true
+  turn.isOpening = session.world !== null
+  note(`the person asked: ${turn.goal}`)
+  // something to see at once: at home he heads for the door, elsewhere (idle, or asleep) he stops to think
+  const isLeaving = stage.leaveHome()
+  // back from home (or the demo): the session's world loads as he steps in, as he left it
+  if (session.world && !session.isWorldShown) {
+    stage.queue(worldScene(session.world, [{ do: 'ponder', secs: 1.5 }]))
+    session.isWorldShown = true
+  } else if (!isLeaving && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
+  askSoon($)
+}
+
+/** The person added to the running turn: the same story goes on. */
+export function addToTurn(text: string) {
+  note(`the person added: ${text.slice(0, MAX_GOAL)}`)
+}
+
+/**
+ * The turn is over. Finished, its wrap-up is asked for at once. Stopped by the person, what was asked
+ * for the stopped work is dropped, and a shrug in the turn's world says so (no model needed).
+ */
+export function endTurn($: EngineInterface, isAborted: boolean) {
+  turn.isRunning = false
+  stage.attention = null
+  if (!isAborted) {
+    turn.isWrapPending = true
+    askSoon($)
+    return
   }
-  return cut(text.trim(), 140)
+  desk.epoch++
+  turn.fresh = 0
+  turn.firstFreshAt = undefined
+  turn.isWrapPending = false
+  turn.acts = []
+  if (session.world) stage.queue(cannedWrap(stage.world(), undefined, true, Math.random))
+}
+
+/** The director waits `ms` (the demo, a /comic-feel). */
+export function pauseFor(ms: number) {
+  desk.pausedUntil = Date.now() + ms
+}
+
+/** The stage left the session's world (for the demo's); the next turn takes him back to it. */
+export function leaveWorld() {
+  session.isWorldShown = false
+}
+
+/** A /clear is a new conversation: its first turn sets up a new world. */
+export function forgetWorld() {
+  session.world = null
+  session.changes = noChanges()
+}
+
+/** /comic-stats: the tokens the director spent, this session and today, and how long its scenes took. */
+export async function stats($: EngineInterface): Promise<string> {
+  const day = today()
+  const tally = asTally(await $.store.get(`usage:${day}`))
+  return `${formatStats(settings.model, desk.tally, tally, day)}\n\n${formatTimings(desk.timings, desk.latencyMs, desk.answered)}`
+}
+
+/** Once a second: home after a long idle, the sky, and the next scene if it is time to ask for one. */
+export async function tick($: EngineInterface) {
+  tellRunning()
+  const now = Date.now()
+  // between turns, a long idle takes him home through the door
+  if (!turn.isRunning && stage.wantsHome) {
+    stage.goHome()
+    session.isWorldShown = false
+  }
+  stage.ambience = { hour: new Date(now).getHours(), weather: weatherAt(now) }
+  if (isAsking() || now < desk.pausedUntil || pats.isAnswering) return
+  if (!(await isEnabled($)) || isAsking()) return
+  const request = nextRequest(now)
+  if (!request) return
+  if (isCanned(request.kind, request.isTurnOpening) || now < desk.retryAfter) return stageCanned(request)
+  await askModel($, request, now)
+}
+
+/** Asks now rather than at the next tick: a new turn, or its end, should not wait a second. */
+function askSoon($: EngineInterface) {
+  $.clock.after(0, () => tick($).catch(() => undefined))
+}
+
+function isAsking(): boolean {
+  return desk.askingIn === desk.epoch
+}
+
+/** A tool still going after a few seconds (a long build, a test run) is news before its result is. */
+function tellRunning() {
+  const now = Date.now()
+  for (const r of running.values()) {
+    if (r.isTold || now - r.since < STILL_RUNNING_MS) continue
+    r.isTold = true
+    note(`still running, no result yet: ${r.what}`)
+  }
+}
+
+/** What to ask for now, if anything; asking takes the turn's unstaged activity with it. */
+function nextRequest(now: number): Request | null {
+  const remainingMs = stage.remainingMs
+  const untilFreeMs = stage.untilFreeMs
+  const hasWorld = session.world !== null
+  // a canned scene is ready at once: it is asked for as the stage runs dry, not a model's latency ahead
+  const isCannedNext = isCanned(!hasWorld ? 'first' : turn.isWrapPending ? 'wrap' : 'scene', turn.isOpening) || now < desk.retryAfter
+  const ask = nextAsk({
+    now, pace: settings.pace, fresh: turn.fresh, lastAsk: desk.lastAsk, lastActivity: turn.lastActivity,
+    isTurnRunning: turn.isRunning, isWrapPending: turn.isWrapPending, isWorldless: !hasWorld || turn.isOpening,
+    interludes: turn.interludes, remainingMs, untilFreeMs, latencyMs: isCannedNext ? 0 : desk.latencyMs,
+  })
+  if (!ask) return null
+  const isInterlude = ask === 'interlude'
+  if (isInterlude) turn.interludes++
+  turn.isWrapPending = false
+  desk.lastAsk = now
+  // after the session's first scene, scenes play in its world; before it, the first sets one up
+  const world = hasWorld ? stage.world() : undefined
+  const kind: Stamp['kind'] = ask === 'wrap' ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
+  const isTurnOpening = turn.isOpening && kind === 'scene'
+  if (kind !== 'interlude') turn.isOpening = false
+  const request: Request = {
+    kind, world, isInterlude, isTurnOpening, acts: turn.acts, fresh: turn.fresh,
+    activity: isInterlude ? undefined : turn.firstFreshAt,
+    expectedLeftMs: isInterlude ? remainingMs : untilFreeMs,
+  }
+  turn.acts = []
+  turn.fresh = 0
+  turn.firstFreshAt = undefined
+  return request
+}
+
+/**
+ * Whether a scene of this kind is canned under /config's director setting. Hybrid has the model
+ * stage the session's world, each turn's opening scene in it, and each wrap-up.
+ */
+function isCanned(kind: Stamp['kind'], isTurnOpening = false): boolean {
+  if (settings.director === 'off') return true
+  return settings.director === 'hybrid' && ((kind === 'scene' && !isTurnOpening) || kind === 'interlude')
+}
+
+/** Asks the model for the scene; with no usable answer a canned one plays instead, and the model rests a while. */
+async function askModel($: EngineInterface, r: Request, now: number) {
+  const interlude = r.isInterlude
+    ? { n: turn.interludes, quietSecs: Math.round((now - turn.lastActivity) / 1000), isLast: turn.interludes === MAX_INTERLUDES }
+    : undefined
+  const prompt = buildPrompt({
+    goal: turn.goal, log: turn.log, fresh: r.fresh, previous: desk.previous, finished: r.kind === 'wrap', interlude, world: r.world,
+    changesLeft: changesLeft(session.changes),
+    variety: varietyNotes(desk.recent, Math.random, session.settings, session.world?.setting),
+  })
+  const mine = desk.epoch
+  desk.askingIn = mine
+  stage.pondering = true
+  let isStaged = false
+  try {
+    const asked = Date.now()
+    const answer = await $.model.complete({ model: settings.model, system: [{ text: SYSTEM, cache: true }], prompt, maxTokens: 1500, effort: 'low', timeoutMs: 45000 })
+    const answeredAt = Date.now()
+    countUsage($, answer.usage).catch(() => undefined) // bookkeeping: the scene does not wait on the store
+    if (answer.isAnswered) desk.latencyMs = blendLatency(desk.latencyMs, answeredAt - asked)
+    // a new turn began while the model worked: this scene belongs to the old one
+    if (mine !== desk.epoch) return
+    if (!answer.isAnswered) return logOnce($, `no scene (${answer.reason})`)
+    const parsed = parseScene(answer.text, r.world, { changes: 'director' })
+    if ('error' in parsed) return logOnce($, `unusable scene (${parsed.error})`)
+    // the director owns the world, within the session's limits
+    const { scene, used } = limitChanges(parsed, session.changes)
+    session.changes = used
+    stageScene(scene, r.isInterlude, { kind: r.kind, activity: r.activity, asked, answered: answeredAt, expectedLeftMs: r.expectedLeftMs })
+    isStaged = true
+    desk.failures = 0
+    desk.hasLoggedError = false
+  } catch (err) {
+    logOnce($, `director failed (${err instanceof Error ? err.message : String(err)})`)
+  } finally {
+    if (desk.askingIn === mine) {
+      desk.askingIn = null
+      stage.pondering = false
+    }
+    if (!isStaged && mine === desk.epoch) {
+      desk.failures++
+      desk.retryAfter = Date.now() + Math.min(60_000, 1_000 * 2 ** desk.failures) // 2s, 4s, 8s ... a minute
+      stageCanned(r)
+    }
+  }
+}
+
+/** A canned scene for the request; none for a wrap-up of a turn that never got a world. */
+function stageCanned(r: Request) {
+  const scene = cannedFor(r)
+  if (scene) stageScene(scene, r.isInterlude)
+}
+
+function cannedFor({ kind, world, acts }: Request): Scene | null {
+  if (kind === 'first') return cannedFirst(turn.goal ?? '', session.settings, Math.random)
+  if (!world) return null
+  if (kind === 'scene') return cannedScene(acts, world, Math.random)
+  if (kind === 'interlude') return cannedInterlude(world, turn.interludes, Math.random)
+  return cannedWrap(world, turn.lastSaid, false, Math.random)
+}
+
+/** Queues a scene: the session's first sets up its world. A model's scene carries its timings. */
+function stageScene(scene: Scene, isInterlude: boolean, stamp?: Stamp) {
+  if (session.world) scene.setting = session.world.setting
+  else {
+    session.settings = [...session.settings, scene.setting].slice(-RECENT_SCENES)
+    session.world = { setting: scene.setting, props: scene.props.map(p => ({ ...p })), hat: scene.hat ?? 'none' }
+    session.isWorldShown = true
+  }
+  desk.previous = scene
+  desk.recent = [...desk.recent, scene].slice(-RECENT_SCENES)
+  if (stamp) {
+    scene.stamp = stamp
+    desk.answered++
+  }
+  scene.isNews = !isInterlude
+  stage.queue(scene)
+}
+
+/** A scene that loads the session's world as it stands, with a few beats to arrive on. */
+function worldScene(world: SessionWorld, beats: Scene['beats']): Scene {
+  return { setting: world.setting, mood: 'neutral', props: world.props.map(p => ({ ...p })), hat: world.hat, beats }
+}
+
+/** One line per run of failures: the next scene that lands lets the next failure be told. */
+function logOnce($: EngineInterface, why: string) {
+  if (!desk.hasLoggedError) $.ui.log(`agent-comic: ${why}`)
+  desk.hasLoggedError = true
+}
+
+/** Adds a call's tokens to this session's tally and to today's, which is kept across sessions. */
+async function countUsage($: EngineInterface, usage: ModelUsage) {
+  desk.tally = addUsage(desk.tally, usage)
+  const key = `usage:${today()}`
+  await $.store.set(key, addUsage(asTally(await $.store.get(key)), usage))
 }

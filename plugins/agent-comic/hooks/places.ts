@@ -4,8 +4,7 @@
 import type { ComicKit, ComicPlace, ComicSide, ComicStop } from '../types'
 import { cellText } from './canvas'
 import { clip } from './scene'
-import { HATS_ART, P, TINTS, claude } from './sprites'
-import { SIGN } from './stage'
+import { HATS_ART, P, SIGN, TINTS, claude } from './sprites'
 import type { Pose } from './sprites'
 
 export const COMIC_VERSION = 1

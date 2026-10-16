@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { ModelCompleteResult, On } from 'claude-code'
 
-import { buildPrompt } from './director'
+import { buildPrompt } from './prompt'
 import { parseScene } from './scene'
 import type { Prop, Scene } from './scene'
 import { Stage } from './stage'

@@ -16,11 +16,8 @@ export const noChanges = (): WorldChangeCounts => ({ transform: 0, hat: 0, trave
 
 /** What the director may still change this session, for its request. */
 export function changesLeft(used: WorldChangeCounts): WorldChangeCounts {
-  return {
-    transform: Math.max(0, WORLD_LIMITS.transform - used.transform),
-    hat: Math.max(0, WORLD_LIMITS.hat - used.hat),
-    travel: Math.max(0, WORLD_LIMITS.travel - used.travel),
-  }
+  const left = (kind: WorldChangeKind) => Math.max(0, WORLD_LIMITS[kind] - used[kind])
+  return { transform: left('transform'), hat: left('hat'), travel: left('travel') }
 }
 
 /**

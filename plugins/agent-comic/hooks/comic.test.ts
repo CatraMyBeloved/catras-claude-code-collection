@@ -4,11 +4,12 @@ import type { ModelCompleteResult, On, RenderElement, RenderPropsOf } from 'clau
 
 import { Canvas, cellText } from './canvas'
 import { chunkSvg } from './svg'
-import { buildPrompt, describeCall, varietyNotes } from './director'
+import { buildPrompt, describeCall, varietyNotes } from './prompt'
 import { addTiming, emptyTimings, formatTimings, nextAsk } from './pacing'
 import type { AskState } from './pacing'
 import { clip, parseScene } from './scene'
-import { Stage, wrap } from './stage'
+import { wrap } from './bubble'
+import { Stage } from './stage'
 import { addHubItem } from './hub'
 import type { HubItem } from './hub'
 import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
@@ -248,10 +249,10 @@ test('after two idle minutes Claude dozes off, and a new scene wakes him', async
   const stage = new Stage(() => 0)
   stage.queue(scene)
   for (let t = 0; t <= 125_000; t += 100) stage.step(50_000 + t)
-  expect((stage as unknown as { mood(): string }).mood()).toBe('sleepy')
+  expect(stage.mood).toBe('sleepy')
   stage.queue(scene)
   stage.step(175_100)
-  expect((stage as unknown as { mood(): string }).mood()).toBe('neutral')
+  expect(stage.mood).toBe('neutral')
 })
 
 const sceneOf = (raw: object, world?: Parameters<typeof parseScene>[1]) => {
@@ -384,11 +385,7 @@ test('a speech bubble never leaves fragments of a sign board around it', async (
 })
 
 test('props never overlap: a crowded world is spread out, and planted signs find a free spot', async () => {
-  type Spans = { span(p: object, col: number): [number, number]; col(x: number, id?: string): number }
-  const spans = (stage: Stage) => {
-    const s = stage as unknown as Spans
-    return stage.world().props.map(p => s.span(p, s.col(p.x, p.id)))
-  }
+  const spans = (stage: Stage) => stage.world().props.map(p => stage.spanOf(p.id)!)
   const disjoint = (list: [number, number][]) =>
     list.every(([l, r], i) => list.every(([ol, or], j) => i === j || r + 2 <= ol || or + 2 <= l))
   const stage = new Stage(() => 0)
@@ -442,25 +439,25 @@ test('a helper walks in, acts out its tool calls, reports back to Claude, and va
   stage.frame(100, 10)
   stage.queue(sceneOf({ setting: 'meadow', props: [], beats: [{ do: 'walk', to: 20 }] }))
   let t = play(stage, 6_000_000, 2_000)
-  stage.helperStart('call-1', 'explore the tests')
-  expect(stage.helperCount).toBe(1)
+  stage.helpers.start('call-1', 'explore the tests')
+  expect(stage.helpers.count).toBe(1)
   t = play(stage, t, 6_000) // walks in
-  stage.helperActivity('agent-a', 'Read')
+  stage.helpers.activity('agent-a', 'Read')
   t = play(stage, t, 1_000)
-  stage.helperActivity('agent-a', 'Grep')
+  stage.helpers.activity('agent-a', 'Grep')
   t = play(stage, t, 2_000)
-  stage.helperDone('call-1')
+  stage.helpers.done('call-1')
   t = play(stage, t, 15_000) // walks over, hops, poof
-  expect(stage.helperCount).toBe(0)
+  expect(stage.helpers.count).toBe(0)
 })
 
 test('at most three helpers, and a background helper leaves after a quiet spell', async () => {
   const stage = new Stage(() => 0.5)
   stage.frame(100, 10)
-  for (const id of ['a', 'b', 'c', 'd']) stage.helperStart(id, id, true)
-  expect(stage.helperCount).toBe(3)
+  for (const id of ['a', 'b', 'c', 'd']) stage.helpers.start(id, id, true)
+  expect(stage.helpers.count).toBe(3)
   play(stage, 7_000_000, 90_000)
-  expect(stage.helperCount).toBe(0)
+  expect(stage.helpers.count).toBe(0)
 })
 
 test('with "show when idle" off, the band shows only while Claude works', { options: { showWhenIdle: false } }, async ($, on) => {
@@ -479,21 +476,21 @@ test('with "show when idle" off, the band shows only while Claude works', { opti
 test('a subagent seen only through its tool calls still gets a small Claude', async () => {
   const stage = new Stage(() => 0.5)
   stage.frame(100, 10)
-  stage.helperActivity('agent-x', 'Read')
-  expect(stage.helperCount).toBe(1)
-  stage.helperActivity('agent-x', 'Grep')
-  expect(stage.helperCount).toBe(1)
+  stage.helpers.activity('agent-x', 'Read')
+  expect(stage.helpers.count).toBe(1)
+  stage.helpers.activity('agent-x', 'Grep')
+  expect(stage.helpers.count).toBe(1)
 })
 
 test('a subagent stop sends its small Claude over to report, then it vanishes', async () => {
   const stage = new Stage(() => 0.5)
   stage.frame(100, 10)
-  stage.helperActivity('agent-y', 'Read')
-  expect(stage.helperCount).toBe(1)
+  stage.helpers.activity('agent-y', 'Read')
+  expect(stage.helpers.count).toBe(1)
   play(stage, 8_000_000, 3_000)
-  stage.helperDoneByAgent('agent-y')
+  stage.helpers.doneByAgent('agent-y')
   play(stage, 8_003_050, 15_000)
-  expect(stage.helperCount).toBe(0)
+  expect(stage.helpers.count).toBe(0)
 })
 
 test('the hat comes with the world: parsed in the first scene, kept by later ones, named to Sonnet', async () => {
@@ -668,19 +665,18 @@ test('news never cuts in while Claude has something in his hands', async () => {
   const news = waits(1)
   if ('error' in busy || 'error' in news) throw new Error('bad scene')
   const stage = new Stage(() => 0.5)
-  const peek = stage as unknown as { carrying: string | null; index: number }
   stage.frame(80, 8)
   stage.queue(busy)
   let t = 10_000
   stage.step(t)
-  while (peek.carrying === null && t < 40_000) stage.step((t += 50))
-  expect(peek.carrying).toBe('c') // holding the crate, past the third beat
+  while (stage.holding === null && t < 40_000) stage.step((t += 50))
+  expect(stage.holding).toBe('c') // holding the crate, past the third beat
   const cuts: { isHolding: boolean; beatsPlayed: number }[] = []
   let played = 0 // beats of the busy scene begun, as of the step before
-  stage.onPlay = () => cuts.push({ isHolding: peek.carrying !== null, beatsPlayed: played })
+  stage.onPlay = () => cuts.push({ isHolding: stage.holding !== null, beatsPlayed: played })
   stage.queue({ ...news, continues: true, isNews: true })
   for (; t <= 60_000; t += 50) {
-    if (!cuts.length) played = peek.index
+    if (!cuts.length) played = stage.beatsBegun
     stage.step(t)
   }
   // it waited for the drop (beat 7), then cut in before the scene's last two beats
@@ -854,34 +850,34 @@ const allText = (stage: Stage) => shown(stage).map(r => r.text).join('\n')
 test('the session opens at home; a new turn walks him through the door into the world of the turn', async () => {
   const st = new Stage(() => 0.5)
   st.frame(90, 10)
-  st.setHome([{ kind: 'trophy', label: 'bug slain', at: 1 }])
+  st.home.setItems([{ kind: 'trophy', label: 'bug slain', at: 1 }])
   st.startHome()
-  expect(st.home).toBe(true)
+  expect(st.isHome).toBe(true)
   expect(st.leaveHome()).toBe(true)
   st.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'wait', secs: 1 }] }))
   let t = 1_000_000
   for (const end = t + 1500; t < end; t += 50) st.step(t)
-  expect(st.home).toBe(true) // still on his way to the door: the world of the turn waits for him
+  expect(st.isHome).toBe(true) // still on his way to the door: the world of the turn waits for him
   for (const end = t + 15_000; t < end; t += 50) {
     st.step(t)
     st.frame(90, 10)
   }
-  expect(st.home).toBe(false)
+  expect(st.isHome).toBe(false)
   expect(st.world().setting).toBe('cave')
   // a long idle between turns, and he goes home again
   for (const end = t + 125_000; t < end; t += 200) st.step(t)
   expect(st.wantsHome).toBe(true)
   st.goHome()
-  expect(st.home).toBe(true)
+  expect(st.isHome).toBe(true)
 })
 
 test('at home a new keepsake pops in with its label up', async () => {
   const st = new Stage(() => 0.5)
   st.frame(90, 10)
-  st.setHome([])
+  st.home.setItems([])
   st.startHome()
   st.step(1_000_000)
-  st.addHomeItem({ kind: 'gem', label: 'rare find', at: 2 })
+  st.home.addItem({ kind: 'gem', label: 'rare find', at: 2 })
   st.step(1_000_050)
   expect(allText(st)).toContain('rare find')
 })
@@ -1017,7 +1013,7 @@ test('a permission request a hook or the auto-mode classifier settles puts no ca
 test('at home every keepsake keeps its title up, and long neighbouring titles never run together', async () => {
   const st = new Stage(() => 0.5)
   st.frame(90, 10)
-  st.setHome([
+  st.home.setItems([
     { kind: 'trophy', label: 'auth bug slain', at: 1 }, { kind: 'statue', label: 'hub world built', at: 2 },
     { kind: 'gem', label: 'rare find', at: 3 },
   ])
@@ -1031,7 +1027,7 @@ test('a new turn has him sprint for the door, awake or woken from a nap', async 
   const leaveFrom = (isAsleep: boolean) => {
     const st = new Stage(() => 0.5)
     st.frame(90, 10)
-    st.setHome([])
+    st.home.setItems([])
     let t = 1_000_000
     if (isAsleep) {
       st.queue(sceneOf({ setting: 'cave', props: [], beats: [{ do: 'wait', secs: 0.3 }] }))
@@ -1042,11 +1038,11 @@ test('a new turn has him sprint for the door, awake or woken from a nap', async 
       st.startHome()
       st.step(t)
     }
-    ;(st as unknown as { x: number }).x = 4 // both start from the far side of the hub
+    ;st.figure.x = 4 // both start from the far side of the hub
     st.leaveHome()
     st.queue(sceneOf({ setting: 'forest', props: [], beats: [{ do: 'wait', secs: 1 }] }))
     const start = t
-    while (st.home && t < start + 30_000) st.step((t += 50))
+    while (st.isHome && t < start + 30_000) st.step((t += 50))
     return t - start
   }
   // about 60 columns to the door: a calm walk (9 a second) would take near 7 s, a sprint under 3
@@ -1091,13 +1087,13 @@ test('at home he keeps himself busy at random, room to room: garden, keepsakes, 
   const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
   const st = new Stage(rand)
   st.frame(100, 10)
-  st.setHome([{ kind: 'trophy', label: 'won', at: 1 }])
+  st.home.setItems([{ kind: 'trophy', label: 'won', at: 1 }])
   st.startHome()
   const seen = new Set<string>()
   for (let t = 1_000_000; t < 1_000_000 + 20 * 60_000; t += 100) {
     st.step(t)
     if (t % 1000 === 0) st.frame(100, 10)
-    const doing = st.homeDoing
+    const doing = st.home.doing
     if (doing && !doing.endsWith(':walking') && !doing.endsWith(':idle')) seen.add(doing)
   }
   for (const doing of ['garden:tend', 'hall:admire', 'den:movie', 'den:rest']) expect(seen.has(doing)).toBe(true)
@@ -1107,18 +1103,18 @@ test('whatever he is doing at home, a new turn has him drop it and sprint for th
   for (const pastime of ['tend', 'movie', 'rest', 'admire'] as const) {
     const st = new Stage(() => 0.5)
     st.frame(100, 10)
-    st.setHome([{ kind: 'gem', label: 'x', at: 1 }])
+    st.home.setItems([{ kind: 'gem', label: 'x', at: 1 }])
     st.startHome()
-    ;(st as unknown as { nextPastime: string }).nextPastime = pastime
+    st.home.request(pastime)
     let t = 1_000_000
     // let him get there and settle in
-    while (!(st.homeDoing ?? '').endsWith(pastime) && t < 1_060_000) st.step((t += 100))
+    while (!(st.home.doing ?? '').endsWith(pastime) && t < 1_060_000) st.step((t += 100))
     for (const end = t + 4000; t < end; t += 100) st.step(t)
-    expect(st.homeDoing?.endsWith(pastime)).toBe(true)
+    expect(st.home.doing?.endsWith(pastime)).toBe(true)
     st.leaveHome()
     st.queue(sceneOf({ setting: 'forest', props: [], beats: [{ do: 'wait', secs: 1 }] }))
     const start = t
-    while (st.home && t < start + 20_000) st.step((t += 50))
+    while (st.isHome && t < start + 20_000) st.step((t += 50))
     expect(t - start).toBeLessThan(6000)
   }
 })

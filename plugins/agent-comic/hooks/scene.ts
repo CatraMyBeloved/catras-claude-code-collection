@@ -1,7 +1,8 @@
-// The scene language Sonnet writes: a setting, a mood, props on the ground, and
-// beats the Claude figure performs one after another.
+// The scene language the director writes (and the canned library too): a setting, a mood, props on
+// the ground, and beats the Claude figure performs one after another. parseScene holds a reply to it.
 
 import { cellText } from './canvas'
+import { clamp } from './util'
 
 export const SETTINGS = ['meadow', 'forest', 'cave', 'night', 'desert', 'library', 'space', 'beach'] as const
 export type Setting = (typeof SETTINGS)[number]
@@ -47,17 +48,20 @@ export type BeatAction =
   | { do: 'hat'; hat: Hat }
   | { do: 'travel'; setting: Setting; props: Prop[]; hat?: Hat }
 
-/** `continues`: plays in the current turn's world (its setting and props, as they now are). */
 export const HATS = ['none', 'wizard', 'miner', 'straw', 'tophat', 'nightcap'] as const
 export type Hat = (typeof HATS)[number]
 
-/**
- * `stamp`: when the director staged it (ms), for the latency figures; scenes made locally have none.
- * `isNews`: it stages new activity (or the turn's end), so the scene playing may give way to it at a pause.
- */
 export type Scene = {
-  setting: Setting; mood: Mood; props: Prop[]; beats: Beat[]; hat?: Hat; continues?: boolean
+  setting: Setting
+  mood: Mood
+  props: Prop[]
+  beats: Beat[]
+  hat?: Hat
+  /** It plays in the world on stage (its setting and props, as they now are), not a world of its own. */
+  continues?: boolean
+  /** When the director staged it, for the latency figures; scenes made locally have none. */
   stamp?: Stamp
+  /** It stages new activity (or the turn's end), so the scene playing may give way to it at a pause. */
   isNews?: boolean
 }
 
@@ -74,7 +78,10 @@ export type Stamp = {
 const MAX_PROPS = 4
 const MAX_BEATS = 9 // the strip stays calm: anything past this is dropped
 export const MAX_SPEECH = 110
-const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
+const MAX_LABEL = 22
+const MAX_ID = 20
+/** Where a new place's props stand, left to right (0..100). */
+export const PROP_SLOTS = [24, 44, 64, 84] as const
 const str = (v: unknown, max: number) => (typeof v === 'string' ? clip(cellText(v), max) : '')
 
 /** Cuts at a word boundary and marks the cut, so a remark never ends mid-word. */
@@ -110,7 +117,7 @@ export function parseScene(
   const end = reply.lastIndexOf('}')
   if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
 
-  let raw: any
+  let raw: any // untrusted JSON: every field is checked below before it is used
   try {
     raw = JSON.parse(reply.slice(start, end + 1))
   } catch (err) {
@@ -125,8 +132,8 @@ export function parseScene(
   const props: Prop[] = []
   for (const p of world ? [] : Array.isArray(raw?.props) ? raw.props.slice(0, MAX_PROPS) : []) {
     if (!PROP_KINDS.includes(p?.kind)) continue
-    const id = str(p.id, 20) || `p${props.length}`
-    const label = str(p.label, 22) || undefined
+    const id = str(p.id, MAX_ID) || `p${props.length}`
+    const label = str(p.label, MAX_LABEL) || undefined
     props.push({ id, kind: p.kind, x: clamp(num(p.x, 50), 0, 100), label })
   }
   if (world) props.push(...world.props.map(p => ({ ...p })))
@@ -155,11 +162,11 @@ export function parseScene(
         if (ids.has(b.at)) beats.push({ do: b.do, at: b.at })
         break
       case 'plant_sign': {
-        const label = str(b.label, 22)
+        const label = str(b.label, MAX_LABEL)
         if (!label) break
         // a fresh id, so later beats (and scenes) can look at or pull this sign
-        let id = str(b.id, 20) || 'note'
-        for (let n = 2; ids.has(id); n++) id = `${str(b.id, 18) || 'note'}${n}`
+        let id = str(b.id, MAX_ID) || 'note'
+        for (let n = 2; ids.has(id); n++) id = `${str(b.id, MAX_ID - 2) || 'note'}${n}`
         ids.add(id)
         signs.add(id)
         beats.push({ do: 'plant_sign', id, label, x: clamp(num(b.x, 50), 0, 100) })
@@ -170,7 +177,7 @@ export function parseScene(
         break
       case 'transform':
         if (mayChange && ids.has(b.at) && PROP_KINDS.includes(b.into)) {
-          beats.push({ do: 'transform', at: b.at, into: b.into, label: str(b.label, 22) || undefined })
+          beats.push({ do: 'transform', at: b.at, into: b.into, label: str(b.label, MAX_LABEL) || undefined })
         }
         break
       case 'type':
@@ -210,7 +217,7 @@ export function parseScene(
         const props: Prop[] = []
         for (const p of Array.isArray(b.props) ? b.props.slice(0, MAX_PROPS) : []) {
           if (!PROP_KINDS.includes(p?.kind)) continue
-          props.push({ id: `${p.kind}${props.length}`, kind: p.kind, x: [24, 44, 64, 84][props.length]!, label: str(p.label, 22) || undefined })
+          props.push({ id: `${p.kind}${props.length}`, kind: p.kind, x: PROP_SLOTS[props.length]!, label: str(p.label, MAX_LABEL) || undefined })
         }
         beats.push({ do: 'travel', setting: b.setting, props, hat: HATS.includes(b.hat) ? b.hat : undefined })
         break

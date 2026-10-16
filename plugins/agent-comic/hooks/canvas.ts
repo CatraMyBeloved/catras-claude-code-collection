@@ -1,10 +1,11 @@
 // A pixel canvas two pixels tall per terminal cell (half blocks), with a text
 // layer on top, encoded into a Raster's cells.
 
+/** No colour: the terminal's own background shows through. */
 export const DEFAULT = 0x01000000
 
-const UPPER = 0x2580
-const LOWER = 0x2584
+const UPPER = 0x2580 // ▀
+const LOWER = 0x2584 // ▄
 
 export class Canvas {
   readonly px: Uint32Array
@@ -21,6 +22,7 @@ export class Canvas {
     this.bg = new Uint32Array(columns * rows)
   }
 
+  /** Sets one pixel; off-canvas pixels are ignored. */
   set(x: number, y: number, color: number) {
     x = Math.round(x)
     y = Math.round(y)
@@ -70,11 +72,11 @@ export class Canvas {
   /** A rounded box around `lines`, top-left at (col, row). */
   box(col: number, row: number, lines: readonly string[], fg: number, bg: number, border: number) {
     if (!lines.length) return
-    const inner = Math.max(...lines.map(l => [...l].length))
+    const inner = Math.max(...lines.map(cellWidth))
     this.text(col, row, '╭' + '─'.repeat(inner + 2) + '╮', border, bg)
     lines.forEach((l, i) => {
       this.text(col, row + 1 + i, '│', border, bg)
-      this.text(col + 1, row + 1 + i, ' ' + l + ' '.repeat(inner - [...l].length + 1), fg, bg)
+      this.text(col + 1, row + 1 + i, ' ' + l + ' '.repeat(inner - cellWidth(l) + 1), fg, bg)
       this.text(col + inner + 3, row + 1 + i, '│', border, bg)
     })
     this.text(col, row + lines.length + 1, '╰' + '─'.repeat(inner + 2) + '╯', border, bg)
@@ -113,6 +115,9 @@ export class Canvas {
   }
 }
 
+const UNFIT = /[\p{Emoji_Presentation}\p{Mn}\p{Me}\p{Cf}]/u
+
+/** The code point a cell shows for `ch`: '?' for anything the host would refuse or draw two wide. */
 function safe(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0x3f
   if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) || cp > 0xffff) return 0x3f
@@ -125,7 +130,8 @@ function safe(ch: string): number {
   return cp
 }
 
-const UNFIT = /[\p{Emoji_Presentation}\p{Mn}\p{Me}\p{Cf}]/u
+/** How many cells `s` takes: one per code point. */
+export const cellWidth = (s: string): number => [...s].length
 
 /**
  * Text as the canvas can draw it, one code point to a cell: accents composed onto
@@ -141,6 +147,7 @@ export function cellText(s: string): string {
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
+/** Base64 without Node or the DOM (the module's environment has neither). */
 export function base64(bytes: Uint8Array): string {
   let out = ''
   let i = 0

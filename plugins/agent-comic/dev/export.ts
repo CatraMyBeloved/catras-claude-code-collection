@@ -4,35 +4,14 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 
-import { parseScene } from '../hooks/scene'
-import type { Scene } from '../hooks/scene'
 import { MOOD_SHOWS } from '../hooks/demo'
-import { Stage } from '../hooks/stage'
+import type { Pastime } from '../hooks/home'
 import type { HubItem } from '../hooks/hub'
+import type { Scene } from '../hooks/scene'
+import { Stage } from '../hooks/stage'
+import { directed, scene, seeded } from './lib'
 
 const out = process.argv[2] ?? 'dev/out/export'
-
-function seeded(seed: number) {
-  return () => {
-    seed |= 0
-    seed = (seed + 0x6d2b79f5) | 0
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-const scene = (raw: unknown): Scene => {
-  const s = parseScene(JSON.stringify(raw))
-  if ('error' in s) throw new Error(s.error)
-  return s
-}
-/** A director's scene in an existing world, so its world-changing beats (travel) are kept. */
-const directed = (raw: { setting: Scene['setting']; hat: Scene['hat']; props: Scene['props']; beats: object[] }): Scene => {
-  const s = parseScene(JSON.stringify(raw), { setting: raw.setting, props: raw.props }, { changes: 'director' })
-  if ('error' in s) throw new Error(s.error)
-  return { ...s, continues: undefined, hat: raw.hat }
-}
 
 type Clip = { kind: 'emotion' | 'action'; shows: string; scene: Scene; ms: number; columns: number }
 const clips: Record<string, Clip> = {}
@@ -86,44 +65,43 @@ const world = scene({
 })
 const working = scene({ setting: 'meadow', props: [{ id: 'c', kind: 'computer', x: 60 }], beats: [{ do: 'walk', to: 30 }, { do: 'type', at: 'c', secs: 6 }] })
 /** At home, settled into a pastime as the clip starts: the lead-in runs just long enough for it. */
-function settle(s: Stage, pastime: string) {
-  s.setHome(KEEPSAKES)
+function settle(s: Stage, pastime: Pastime) {
+  s.home.setItems(KEEPSAKES)
   s.startHome()
-  ;(s as unknown as { nextPastime: string }).nextPastime = pastime
-  const doing = () => (s as unknown as { pastime: { phase: string } | null }).pastime?.phase === 'do'
-  let t = 960_000
-  while (!(doing() && (s.homeDoing ?? '').endsWith(pastime)) && t < 999_000) s.step((t += 100))
+  s.home.request(pastime)
+    let t = 960_000
+  while (!s.home.isDoing(pastime) && t < 999_000) s.step((t += 100))
   // shift: the clip's clock starts at 1_000_000, so step on from where we are without a gap
   for (let k = 0; k < 20; k++) s.step((t += 50))
   ;(s as unknown as { last: number }).last = 0
 }
 const features: Record<string, Feature> = {
   'hub-start': { shows: 'the session opens at home: keepsakes from earlier sessions, labels as he strolls by', ms: 9000, columns: 90,
-    setup: s => { s.setHome(KEEPSAKES); s.startHome() } },
+    setup: s => { s.home.setItems(KEEPSAKES); s.startHome() } },
   'hub-new-keepsake': { shows: 'Claude adds a keepsake with the hub tool: it pops in, labelled', ms: 4000, columns: 90,
-    setup: s => { s.setHome(KEEPSAKES.slice(0, 3)); s.startHome() },
-    at: [[800, s => s.addHomeItem({ kind: 'medal', label: 'parser rewrite', at: 9 })]] },
+    setup: s => { s.home.setItems(KEEPSAKES.slice(0, 3)); s.startHome() },
+    at: [[800, s => s.home.addItem({ kind: 'medal', label: 'parser rewrite', at: 9 })]] },
   'door-out': { shows: 'a new turn: he sprints to the door, goes through, and steps into the world of the turn', ms: 11000, columns: 90,
-    setup: s => { s.setHome(KEEPSAKES); s.startHome() },
+    setup: s => { s.home.setItems(KEEPSAKES); s.startHome() },
     at: [[600, s => { s.leaveHome(); s.queue(world) }]] },
   'door-home': { shows: 'a long idle between turns: back home through the door, and a nap soon after', ms: 19000, columns: 90,
-    setup: s => { s.setHome(KEEPSAKES); s.queue(world) },
+    setup: s => { s.home.setItems(KEEPSAKES); s.queue(world) },
     at: [[1500, s => s.goHome()]] },
   'door-sprint': { shows: 'a new turn while he naps at home: he starts awake and sprints for the door', ms: 6000, columns: 90,
     setup: s => {
       // home 30 s before the clip starts, asleep by then; he dozed off on the far side
-      s.setHome(KEEPSAKES)
+      s.home.setItems(KEEPSAKES)
       s.step(970_000)
       s.goHome()
       for (let t = 970_000; t < 1_000_000; t += 100) s.step(t)
-      ;(s as unknown as { x: number }).x = 4
+      ;s.figure.x = 4
     },
     at: [[800, s => { s.leaveHome(); s.queue(world) }]] },
   'hub-garden': { shows: 'at home: in the garden he waters the flowers, which grow and bloom', ms: 9000, columns: 100, setup: s => settle(s, 'tend') },
   'hub-movie': { shows: 'at home: on the couch in the den, watching a film', ms: 7000, columns: 100, setup: s => settle(s, 'movie') },
   'hub-rest': { shows: 'at home: a rest in bed, tucked in', ms: 5000, columns: 100, setup: s => settle(s, 'rest') },
   'hub-rooms': { shows: 'at home: off one edge and in from the other, to the next room', ms: 9000, columns: 100,
-    setup: s => { s.setHome(KEEPSAKES); s.startHome(); (s as unknown as { nextPastime: string }).nextPastime = 'movie'; for (let t = 994_000; t < 1_000_000; t += 100) s.step(t) } },
+    setup: s => { s.home.setItems(KEEPSAKES); s.startHome(); s.home.request('movie'); for (let t = 994_000; t < 1_000_000; t += 100) s.step(t) } },
   'hub-interrupt': { shows: 'a new turn while he watches a film: up off the couch and a sprint for the door', ms: 5000, columns: 100,
     setup: s => settle(s, 'movie'), at: [[1000, s => { s.leaveHome(); s.queue(world) }]] },
   'world-prop': { shows: 'the director changes a prop: he lifts it overhead, a puff, and it is something new', ms: 9000, columns: 80,

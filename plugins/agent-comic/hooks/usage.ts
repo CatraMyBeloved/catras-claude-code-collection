@@ -1,4 +1,4 @@
-// What the director's Sonnet calls cost, in tokens: per session and per day.
+// What the director's model calls cost, in tokens: per session and per day.
 
 import type { ModelUsage } from 'claude-code'
 

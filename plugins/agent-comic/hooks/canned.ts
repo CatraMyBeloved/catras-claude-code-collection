@@ -1,7 +1,7 @@
 // A token-free scene library: canned scenes in the same scene language the director writes,
 // so the comic works with few or no model calls. Every scene goes through `parseScene`.
 
-import { clip, parseScene, SETTINGS } from './scene'
+import { PROP_SLOTS, SETTINGS, clip, parseScene } from './scene'
 import type { Hat, Prop, PropKind, Scene, Setting } from './scene'
 
 /** One thing the agent did, as the comic needs it. Labels are already short, clean, single-line text (<= 20 chars), e.g. a file's base name. */
@@ -18,6 +18,9 @@ export type World = { setting: Setting; props: readonly Prop[] }
 
 type Rand = () => number
 type Raw = Record<string, unknown>
+
+/** A remark the agent made, on one line and cut short for a bubble. */
+const remark = (text: string) => clip(text.replace(/\s+/g, ' ').trim(), 60)
 
 const pick = <T,>(list: readonly T[], rand: Rand): T => list[Math.min(list.length - 1, Math.floor(rand() * list.length))]!
 const chance = (p: number, rand: Rand) => rand() < p
@@ -61,7 +64,7 @@ const KEYWORDS: [RegExp, Setting[]][] = [
 export function cannedProps(setting: Setting, rand: Rand): Prop[] {
   const place = PLACES[setting]
   const kinds: PropKind[] = [pick(place.work, rand), ...shuffle(place.rest, rand).slice(0, 3)]
-  const slots = shuffle([24, 44, 64, 84], rand)
+  const slots = shuffle(PROP_SLOTS, rand)
   return shuffle(kinds, rand).map((kind, i) => {
     const p: Prop = { id: `${kind}${i}`, kind, x: slots[i]! + Math.round((rand() - 0.5) * 8) }
     if (kind === 'sign') p.label = pick(SIGN_LABELS, rand)
@@ -93,7 +96,7 @@ export function cannedFirst(goal: string, recent: readonly Setting[], rand: Rand
   const target = pick(ids, rand)
   const others = ids.filter(i => i !== target)
   const other = pick(others, rand)
-  const topic = clip(goal.replace(/\s+/g, ' ').trim(), 60)
+  const topic = remark(goal)
   const beats: Raw[] = [{ do: 'walk', to: between(8, 18, rand) }]
   beats.push({ do: 'look', at: target, react: chance(0.5, rand) ? '?' : undefined })
   if (chance(0.5, rand)) beats.push({ do: 'look', at: other })
@@ -103,8 +106,12 @@ export function cannedFirst(goal: string, recent: readonly Setting[], rand: Rand
 
 // ---- scenes in a world ----
 
+/** What the chunks of a scene share: the world, the dice, the prop ids taken, the signs planted. */
 type Ctx = { world: World; rand: Rand; ids: Set<string>; signs: number }
+/** A few beats acting out one activity, and the mood they carry. */
 type Chunk = { beats: Raw[]; mood: string }
+
+const context = (world: World, rand: Rand): Ctx => ({ world, rand, ids: new Set(world.props.map(p => p.id)), signs: 0 })
 
 const of = (c: Ctx, ...kinds: PropKind[]): Prop | undefined => {
   const found = c.world.props.filter(p => kinds.includes(p.kind))
@@ -259,7 +266,7 @@ const MAX_BEATS = 5
 
 /** A short scene in the current world acting out the freshest activities. */
 export function cannedScene(acts: readonly Activity[], world: World, rand: Rand): Scene {
-  const c: Ctx = { world, rand, ids: new Set(world.props.map(p => p.id)), signs: 0 }
+  const c = context(world, rand)
   const hadFail = acts.some(a => a.kind === 'fail' || (a.kind === 'test' && !a.ok))
   const said = acts.filter((a): a is Extract<Activity, { kind: 'said' }> => a.kind === 'said').at(-1)
   const ranked = acts.filter(a => a.kind !== 'said').map((a, i) => ({ a, i })).sort((x, y) => salience(x.a) - salience(y.a) || x.i - y.i)
@@ -282,7 +289,7 @@ export function cannedScene(acts: readonly Activity[], world: World, rand: Rand)
   }
   if (!beats.length) beats.push(...lookAround(c))
   if (said && beats.length < MAX_BEATS) {
-    const text = clip(said.text.replace(/\s+/g, ' ').trim(), 60)
+    const text = remark(said.text)
     if (text) beats.push({ do: 'say', text, secs: 4 })
   }
   return build({ mood: mood || 'neutral', beats: beats.slice(0, MAX_BEATS) }, world)
@@ -290,7 +297,7 @@ export function cannedScene(acts: readonly Activity[], world: World, rand: Rand)
 
 /** A quiet-moment interlude in the current world (n = 1..; the 4th is the last): small idle business, later ones sleepier. */
 export function cannedInterlude(world: World, n: number, rand: Rand): Scene {
-  const c: Ctx = { world, rand, ids: new Set(world.props.map(p => p.id)), signs: 0 }
+  const c = context(world, rand)
   const prop = of(c, 'tree', 'lamp', 'flag', 'mushroom', 'rock', 'cactus', 'chest', 'crate', 'sign', 'bug', 'scroll', 'books', 'computer')
   const lookAt: Raw[] = prop ? [{ do: 'look', at: prop.id, react: chance(0.3, rand) ? '?' : undefined }] : []
   let beats: Raw[]
@@ -322,8 +329,8 @@ const ABORT_LINES = ['Okay, stopping here.', 'Right, pausing for now.', 'Alright
 
 /** The turn's wrap-up in the current world. `aborted`: no celebration, a shrug or a small sigh instead. */
 export function cannedWrap(world: World, lastSaid: string | undefined, aborted: boolean, rand: Rand): Scene {
-  const c: Ctx = { world, rand, ids: new Set(world.props.map(p => p.id)), signs: 0 }
-  const said = lastSaid ? clip(lastSaid.replace(/\s+/g, ' ').trim(), 60) : ''
+  const c = context(world, rand)
+  const said = lastSaid ? remark(lastSaid) : ''
   const prop = of(c, 'flag', 'chest', 'computer', 'tree', 'lamp', 'crate')
   if (aborted) {
     const beats: Raw[] = said || chance(0.5, rand)

@@ -130,3 +130,15 @@ export function chunkSvg(frames: readonly Canvas[], stepMs: number): string | un
 
   return svg.length <= SVG_BUDGET ? svg : undefined
 }
+
+/**
+ * Frames `stepMs` apart as one SVG within the budget: at full rate when that fits, else every second
+ * frame, every third...; at worst the last frame, still. `every` says which frames were kept (null: still).
+ */
+export function fitChunk(frames: readonly Canvas[], stepMs: number): { svg: string; every: number | null } {
+  for (let every = 1; every <= frames.length; every++) {
+    const svg = chunkSvg(frames.filter((_, i) => i % every === 0), stepMs * every)
+    if (svg) return { svg, every }
+  }
+  return { svg: stillSvg(frames.at(-1)!), every: null }
+}

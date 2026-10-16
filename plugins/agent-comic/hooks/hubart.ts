@@ -2,14 +2,11 @@
 // Same conventions as sprites.ts: one letter per pixel, '.' transparent, sprites stand on their
 // last row, light from the top left, each object a ramp of highlight, base and a shadow.
 
-import { P, type Look } from './sprites'
+import { P, TINTS } from './sprites'
+import type { Art, Look } from './sprites'
 
 export const HUB_KINDS = ['trophy', 'medal', 'plant', 'flower', 'lantern', 'banner', 'gem', 'statue'] as const
 export type HubKind = (typeof HUB_KINDS)[number]
-
-type Art = { rows: readonly string[]; palette: Record<string, number> }
-
-const ORANGE = 0xd97757
 
 /** Keepsakes Claude adds to his hub: each at most 7 wide and 7 tall, standing on its last row. */
 export const HUB_ART: Record<HubKind, Art> = {
@@ -43,7 +40,7 @@ export const HUB_ART: Record<HubKind, Art> = {
   },
   statue: {
     rows: ['.hhhhh.', '.hEOEs.', 'hOOOOOs', '..s.s..', 'mmmmmmm', '.MMMMd.', 'MMMMMdd'],
-    palette: { h: 0xeea27d, O: ORANGE, s: 0xb4533f, E: P.ink, m: P.silver, M: P.mist, d: P.steel },
+    palette: { ...TINTS.normal, m: P.silver, M: P.mist, d: P.steel }, // Claude's own colours
   },
 }
 
@@ -84,26 +81,26 @@ export const HUB_LOOK: Look = {
 }
 
 /** A small cloud, soft grey-white with a darker underside, and a darker rain-cloud variant. */
-export const CLOUD: Art = {
-  rows: ['...wwS....', '.wwwSSSS..', 'wSSSSSmmmm'],
-  palette: { w: P.white, S: P.silver, m: P.mist },
-}
-export const RAIN_CLOUD: Art = {
-  rows: ['...wwS....', '.wwwSSSS..', 'wSSSSSmmmm'],
-  palette: { w: P.mist, S: P.steel, m: P.slate },
-}
+const CLOUD_ROWS = ['...wwS....', '.wwwSSSS..', 'wSSSSSmmmm']
+export const CLOUD: Art = { rows: CLOUD_ROWS, palette: { w: P.white, S: P.silver, m: P.mist } }
+export const RAIN_CLOUD: Art = { rows: CLOUD_ROWS, palette: { w: P.mist, S: P.steel, m: P.slate } }
 
 /** The colour of a rain drop streak. */
 export const RAIN = P.sky
 
 // ---- the garden and the den ----
 
-/** A flower in 3 growth stages (sprout, bud, bloom), each 5 wide and at most 7 tall, standing on its last row. Petal pixels use the letter 'b' (bloom colour, swapped per flower) and 'B' (its shade); stem/leaves fixed greens. */
+/**
+ * A flower in 3 growth stages (sprout, bud, bloom), each 5 wide and at most 7 tall, standing on its
+ * last row. Petals are 'b' (the bloom's colour, swapped per flower) and 'B' (its shade); the stem and
+ * leaves are fixed greens.
+ */
 export const FLOWER_STAGES: readonly (readonly string[])[] = [
   ['.l.l.', '.lgl.', '..g..', '..g..'],
   ['..b..', '.bbB.', '.lgl.', '..g..', '..g..'],
   ['.bbb.', 'bbybB', '.bBB.', '..g..', '.lg..', '..gd.', '..g..'],
 ]
+export const FLOWER_WIDTH = 5
 export function flowerPalette(petal: number, shade: number): Record<string, number> {
   return { b: petal, B: shade, y: P.amber, l: P.leaf, g: P.moss, d: P.pine }
 }

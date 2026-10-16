@@ -70,6 +70,7 @@ export type SceneTiming = {
 
 const KEEP_RECENT = 8
 
+/** The latency figures summed over the session's scenes, and the last few on their own. */
 export type Timings = { scenes: number; staged: number; waitMs: number; modelMs: number; queueMs: number; totalMs: number; recent: SceneTiming[] }
 
 export const emptyTimings = (): Timings => ({ scenes: 0, staged: 0, waitMs: 0, modelMs: 0, queueMs: 0, totalMs: 0, recent: [] })
@@ -97,6 +98,7 @@ export function addTiming(t: Timings, stamp: Stamp, playedAt: number): Timings {
   }
 }
 
+/** /comic-stats' latency tables. */
 export function formatTimings(t: Timings, latencyMs: number, asked: number): string {
   if (t.scenes === 0) return 'Latency: no director scene has played yet this session.'
   const s = (ms: number, n: number) => (n ? `${(ms / n / 1000).toFixed(1)}s` : 'n/a')

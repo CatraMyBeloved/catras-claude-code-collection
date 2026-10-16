@@ -46,6 +46,6 @@ for name, c in clips.items():
     sections[c['kind']].append(f'| {name} | {c["shows"]} | ![{name}]({folder}/{name}.gif) |')
     print(f'{folder}/{name}.gif  ({len(frames)} frames)')
 
-open(f'{out}/README.md', 'w', encoding='utf-8').write('\n'.join(readme + sections['emotion'] + [''] + sections['action']) + '\n')
+open(f'{out}/README.md', 'w', encoding='utf-8').write('\n'.join(readme + sections['emotion'] + [''] + sections['action'] + [''] + sections['feature']) + '\n')
 os.remove(f'{out}/frames.json')
 print(f'{out}/README.md')

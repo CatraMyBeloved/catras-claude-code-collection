@@ -2,8 +2,12 @@
 // One palette for everything (Endesga 32), light from the top left: each object
 // is a ramp of highlight, base and a hue-shifted shadow, no lone pixels.
 
-import type { Mood, PropKind, Setting } from './scene'
+import type { Hat, Mood, PropKind, Setting } from './scene'
 
+/** A sprite: one letter per pixel ('.' transparent), each letter's colour in `palette`. */
+export type Art = { rows: readonly string[]; palette: Record<string, number> }
+
+/** The comic's palette by name (Endesga 32). */
 export const P = {
   ink: 0x181425, night: 0x262b44, slate: 0x3a4466, steel: 0x5a6988, mist: 0x8b9bb4, silver: 0xc0cbdc, white: 0xffffff,
   wine: 0x3e2731, bark: 0x733e39, wood: 0xb86f50, tan: 0xe4a672, sand: 0xead4aa, skin: 0xe8b796, clay: 0xc28569,
@@ -21,6 +25,15 @@ export const TINTS = {
   sad: { h: 0xd3a48f, O: 0xb88370, s: 0x8a5a50, E: P.ink },
 }
 export type Tint = keyof typeof TINTS
+
+/** The colours of boxed words: the text, the board behind it, the border. */
+export type BoxStyle = { fg: number; bg: number; border: number }
+export const SPEECH: BoxStyle = { fg: P.sand, bg: P.wine, border: ORANGE }
+export const THOUGHT: BoxStyle = { fg: P.silver, bg: P.night, border: P.mist }
+/** "Needs you": the one loud thing on the stage. */
+export const CALL: BoxStyle = { fg: P.ink, bg: P.yellow, border: P.amber }
+/** The wooden signs: planted in a world, and the route signs at the band's top corners. */
+export const SIGN: BoxStyle = { fg: P.white, bg: P.bark, border: P.tan }
 
 export const CLAUDE_WIDTH = 11
 export const CLAUDE_HEIGHT = 7
@@ -126,7 +139,7 @@ export const MINI_HEIGHT = 5
  * Hats, 11 wide like Claude and facing right (mirrored with him). `sit` rows of the
  * brim rest over his head's top row; the rest stands above it.
  */
-export const HATS_ART: Record<'wizard' | 'miner' | 'straw' | 'tophat' | 'nightcap', { rows: string[]; palette: Record<string, number>; sit: number }> = {
+export const HATS_ART: Record<Exclude<Hat, 'none'>, Art & { sit: number }> = {
   wizard: {
     rows: ['......pP...', '.....pPP...', '....pPPP...', '...pPYPP...', '...pPPPPP..', '.DDDDDDDDD.'],
     palette: { P: P.plum, p: P.pink, D: P.wine, Y: P.yellow }, sit: 0,
@@ -159,8 +172,6 @@ export const BITS = {
   miniBook: { rows: ['wsw', 'bbb'], palette: { w: P.white, s: P.mist, b: P.blood } },
   heart: { rows: ['.h.r.', 'hrrrd', '.rrd.', '..d..'], palette: { h: P.coral, r: P.red, d: P.blood } },
 }
-
-type Art = { rows: readonly string[]; palette: Record<string, number> }
 
 /** An RPG emote balloon: white, 9 by 8 with a tail, the icon set into it at (2, 1). */
 export const BALLOON = {
@@ -229,6 +240,14 @@ export const PROPS: Record<Exclude<PropKind, 'sign'>, Art> = {
 
 /** The waving flag's second frame. */
 export const FLAG_WAVE = ['pphr', 'prrr', 'pdrr', 'p...', 'p...', 'p...', 'pp..']
+
+/** A commit's little flag, planted beside Claude. */
+export const PENNANT: Art = { rows: ['phh', 'pyy', 'p..', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
+/** The flag at the end of the task trail, gold once every task is done. */
+export const GOAL_FLAG: Art = { rows: ['phh', 'prr', 'p..', 'p..'], palette: { p: P.silver, h: P.coral, r: P.red } }
+export const GOAL_FLAG_DONE: Art = { rows: ['phh', 'pyy', 'p..', 'p..'], palette: { p: P.silver, h: P.yellow, y: P.amber } }
+/** A push's balloon, let go to drift off the top. */
+export const BALLOON_UP: Art = { rows: ['.r.', 'rhr', 'rrr', '.r.', '.s.', 's..'], palette: { r: P.red, h: P.coral, s: P.silver } }
 
 export type FarKind = 'hills' | 'pines' | 'stalactites' | 'dunes' | 'shelves' | 'sea' | 'craters'
 

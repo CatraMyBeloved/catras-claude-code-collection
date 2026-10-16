@@ -1,518 +1,82 @@
-import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+// agent-comic: a pixel comic in the band above the prompt, where a little Claude acts out what the agent
+// is doing. This module wires it into Claude Code: the hooks, the commands and the band.
+//
+//   stage.ts plays and draws the comic, with the hub (home.ts) and the subagents' helpers (helpers.ts);
+//   director.ts stages it from what the agent does (activity.ts) with the model or canned scenes;
+//   state.ts and places.ts keep the ring of places other plugins add through $.comic (EXTENDING.md).
 
-import { cannedFirst, cannedInterlude, cannedScene, cannedWrap } from './canned'
-import type { Activity } from './canned'
-import { cellText } from './canvas'
+import type { EngineInterface, On, Register } from 'claude-code'
+
+import type { Comic } from '../types'
+import { CUES, clearFinishedTasks, observe } from './activity'
+import { RASTER_KEY, desktopChunk, getSvgMode, hideBand, setSvgMode, startBand, terminalCells } from './band'
 import { DEMO_MS, demoScene, feelBeat } from './demo'
-import { SYSTEM, buildPrompt, describeCall, varietyNotes } from './director'
-import { MAX_INTERLUDES, addTiming, blendLatency, emptyTimings, formatTimings, nextAsk } from './pacing'
-import type { Timings } from './pacing'
+import {
+  act, addToTurn, beginTurn, endTurn, forgetWorld, heard, isTurnRunning, leaveWorld, note, pauseFor, startDirector, stats, tick, toolEnded, toolStarted,
+} from './director'
 import { HUB_STORE_KEY, HUB_TOOL, HUB_TOOL_SPEC, MAX_HUB_ITEMS, addHubItem, asHubItems, hubItemFrom } from './hub'
 import type { HubItem } from './hub'
-import { MOODS, clip, parseScene } from './scene'
-import type { Mood, Scene, Stamp } from './scene'
-import { changesLeft, followWorld, limitChanges, noChanges } from './world'
-import type { SessionWorld, WorldChangeCounts } from './world'
-import { PACES, Stage } from './stage'
-import { chunkSvg, stillSvg } from './svg'
-import type { Canvas } from './canvas'
-import type { Weather } from './stage'
-import { addUsage, asTally, emptyTally, formatStats, today } from './usage'
-import type { Tally } from './usage'
-import { ALIVE_MS, COMIC_VERSION, HUB, asPlace, enteringFrom, kit, routeOf, withPlace, withoutPlace } from './places'
-import type { Comic, ComicSide, ComicState, ComicStop } from '../types'
+import { givePat, pats } from './pets'
+import { COMIC_VERSION, HUB, asPlace, kit, routeOf } from './places'
+import { describeCall } from './prompt'
+import { applySettings, settings, stage } from './runtime'
+import { MOODS } from './scene'
+import type { Mood } from './scene'
+import {
+  addPlace, checkPlace, goTo, isEnabled, isLingering, placeAlive, removePlace, routeNow, setEnabled, setLingering, stepTo, stops, syncState, whereNow,
+} from './state'
 
-/** The /config settings, read when the module (re)loads. */
-type Settings = { model: string; pace: keyof typeof PACES; showWhenIdle: boolean; director: Director }
-/** Who stages the scenes: the model for all (full), for a turn's opening and wrap-up (hybrid), or none (off). */
-type Director = 'full' | 'hybrid' | 'off'
-let settings: Settings = { model: 'sonnet', pace: 'calm', showWhenIdle: true, director: 'hybrid' }
-
-const STILL_RUNNING_MS = 4000 // a tool running this long is told to the director before it ends
-const LINGER_MS = 25000 // the band stays this long after a turn ends
-const FRAME_MS = 50
-const CHUNK_MS = 1000
+const LINGER_MS = 25_000 // the band stays this long after a turn ends
+const FEEL_MS = 9000 // the band stays up this long for a /comic-feel
 const MAX_ROWS = 10
 const MIN_ROWS = 6
-const KEY = 'stage'
 const PET_KEY = 'pet'
-// a pat, sent as the person's own message: Claude reads it and answers
-const PET_LINES = [
-  'Here, have a headpat. You are doing amazing!',
-  '*pats your head* You are doing great, Claude.',
-  'Headpat delivery! Thanks for all the help today.',
-  'Here is a little headpat. Keep it up!',
-  '*gentle headpat* Proud of you.',
-  'Have a headpat, you have earned it!',
-  'Headpat break! You are doing wonderfully.',
-  '*pat pat* Great work so far.',
-]
-let lastPetLine = -1
-let isPetTurn = false // Claude is answering a pat: the comic stays as it is
-let pendingPats: string[] = [] // headpats sent, their turns not begun yet
-const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
-const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
-const WEATHER_MS = 180_000 // failures this recent cloud the sky
-// tools that put a question to the person, who must answer before the turn goes on
-const ASKS_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode'])
-const TEST_RUN = /\b(?:jest|vitest|pytest|mocha|rspec|ctest|tox|phpunit)\b|\b(?:cargo|go|bun|deno|dotnet|mvn|gradle|npm|pnpm|yarn)\s+(?:run\s+)?test\b|\bplugin test\b|\bmake (?:test|check)\b/
-
-const enabled = atom({ plugin: 'agent-comic', key: 'enabled' } as const, true)
-const lingering = atom({ plugin: 'agent-comic', key: 'lingering' } as const, false)
-// the world beyond the hub: places other plugins add through $.comic (places.ts)
-const bandState = atom({ plugin: 'agent-comic', key: 'state' } as const, 'hidden' as ComicState)
-const here = atom({ plugin: 'agent-comic', key: 'here' } as const, null as string | null)
-const cameFrom = atom({ plugin: 'agent-comic', key: 'cameFrom' } as const, null as ComicSide | null)
-const ring = atom({ plugin: 'agent-comic', key: 'places' } as const, [HUB] as ComicStop[])
-const aliveAt = new Map<string, number>() // when each place last said it was drawing
 const SIGN_LEFT = 'sign-left'
 const SIGN_RIGHT = 'sign-right'
-
-const stage = new Stage()
-let mount: { requestId: string; columns: number; rows: number } | null = null
-let isBlitting = false
-
-let goal: string | null = null
-let log: string[] = []
-let fresh = 0
-let lastActivity = 0
-let isTurnRunning = false
-let interludes = 0 // asked for since the last new activity
-let lastAsk = 0
-let epoch = 0 // bumped by each new turn: an answer asked for an older one is dropped
-let askingIn: number | null = null // the epoch of the ask under way, if any
-let failures = 0 // asks in a row that brought no scene
-let retryAfter = 0 // after a failure the director backs off until then
-let isWrapPending = false
-let previous: Scene | null = null
-let recent: Scene[] = [] // the last scenes Sonnet staged, for its variety notes
-let turnSettings: Scene['setting'][] = [] // one per turn, oldest first
-let turnSetting: Scene['setting'] | null = null // the session world's setting, once its first scene set it up
-// the session's world: set up by its first scene, then changed only by the director, now and then
-let sessionWorld: SessionWorld | null = null
-let isWorldShown = false // the stage shows the session's world (not home, not the demo's)
-let worldChanges: WorldChangeCounts = noChanges() // what the director changed this session
-let isOpening = false // a new turn's first scene is still to be staged: the model stages it, in the session's world
-let hasLoggedError = false
-let linger: { cancel: () => void } | null = null
-let directorPausedUntil = 0 // while the demo or a /comic-feel plays, Sonnet waits
-let sessionTally: Tally = emptyTally()
-let latencyMs = 7000 // the director's recent answer time; the first answers correct it
-let firstFreshAt: number | undefined // when the oldest activity not yet staged happened
-let timings: Timings = emptyTimings()
-let acts: Activity[] = [] // what the agent did since the last staged scene, for canned scenes
-let lastSaid: string | undefined // the agent's latest remark to the person
-let failTimes: number[] = [] // recent failures: they bring clouds, and rain
-let hubItems: HubItem[] = []
-let hubAdds = 0
-let tasksMade = 0 // TaskCreate calls this list
-const tasksDone = new Set<string>()
-let answered = 0 // scenes the director handed over this session
-// the main thread's tool calls under way, to tell the director about long ones before they end
-const running = new Map<string, { what: string; since: number; isTold: boolean }>()
-
-function note(line: string) {
-  log.push(line)
-  log = log.slice(-40)
-  if (fresh === 0) firstFreshAt = Date.now()
-  fresh++
-  lastActivity = Date.now()
-  interludes = 0
-}
-
-function drawFrame($: EngineInterface) {
-  // while the desktop draws the band, the stage runs ahead of the clock in chunks: never step it back
-  if (desk && !mount) return
-  stage.step(Date.now())
-  if (!mount || isBlitting) return
-  const { requestId, columns, rows } = mount
-  isBlitting = true
-  $.ui.blit({ requestId, key: KEY, cells: stage.frame(columns, rows) })
-    .catch(() => undefined)
-    .finally(() => { isBlitting = false })
-}
-
-/**
- * The desktop (and VS Code) draw no Raster: the band is an SVG that plays a chunk of
- * frames by itself. Once a chunk, the stage is stepped through the next one, its frames
- * turned into one SVG, and the band redrawn with it; the stage leads the clock by up to
- * a chunk, so what happens shows up to that much later than on the terminal.
- */
-let desk: { requestId: string; columns: number; rows: number } | null = null
-let deskSvg: string | null = null
-let deskSize = ''
-/** 'image' draws the SVG as a picture; 'frame' in a sandboxed frame (the SMIL route the API documents). */
-let deskMode: 'image' | 'frame' = 'image'
-
-function buildChunk() {
-  if (!desk) return
-  const { columns, rows } = desk
-  const start = Math.max(Date.now(), stage.time + FRAME_MS)
-  const frames: Canvas[] = []
-  for (let t = start; t < start + CHUNK_MS; t += FRAME_MS) {
-    stage.step(t)
-    frames.push(stage.frameCanvas(columns, rows))
-  }
-  // full rate when it fits; otherwise every second frame, every third...
-  for (let every = 1; every <= frames.length; every++) {
-    const picked = frames.filter((_, i) => i % every === 0)
-    const svg = chunkSvg(picked, FRAME_MS * every)
-    if (svg) {
-      deskSvg = svg
-      return
-    }
-  }
-  deskSvg = stillSvg(frames.at(-1)!)
-}
-
-function deskTick($: EngineInterface) {
-  if (!desk || mount) return
-  buildChunk()
-  $.ui.invalidate('ui.render')
-}
-
-/** A tool still going after a few seconds (a long build, a test run) is news before its result is. */
-function tellRunning() {
-  const now = Date.now()
-  for (const r of running.values()) {
-    if (r.isTold || now - r.since < STILL_RUNNING_MS) continue
-    r.isTold = true
-    note(`still running, no result yet: ${r.what}`)
-  }
-}
-
-async function direct($: EngineInterface) {
-  tellRunning()
-  const now = Date.now()
-  // between turns, a long idle takes him home through the door
-  if (!isTurnRunning && stage.wantsHome) {
-    stage.goHome()
-    isWorldShown = false
-  }
-  stage.ambience = { hour: new Date(now).getHours(), weather: weatherNow(now) }
-  if (askingIn === epoch || now < directorPausedUntil || isPetTurn) return
-  if (!(await read($, enabled)) || askingIn === epoch) return
-  const remainingMs = stage.remainingMs
-  const untilFreeMs = stage.untilFreeMs
-  // a canned scene is ready at once: it is asked for as the stage runs dry, not a model's latency ahead
-  const isCannedNext = isCanned(!turnSetting ? 'first' : isWrapPending ? 'wrap' : 'scene', isOpening) || now < retryAfter
-  const ask = nextAsk({
-    now, pace: settings.pace, fresh, lastAsk, lastActivity, isTurnRunning, isWrapPending,
-    isWorldless: !turnSetting || isOpening, interludes, remainingMs, untilFreeMs, latencyMs: isCannedNext ? 0 : latencyMs,
-  })
-  if (!ask) return
-  const finished = ask === 'wrap'
-  const isInterlude = ask === 'interlude'
-  if (isInterlude) interludes++
-  isWrapPending = false
-  lastAsk = now
-  // after the turn's first scene, scenes play in that world; before it, the first sets one up
-  const world = turnSetting ? stage.world() : undefined
-  const kind: Stamp['kind'] = finished ? 'wrap' : isInterlude ? 'interlude' : world ? 'scene' : 'first'
-  const isTurnOpening = isOpening && kind === 'scene'
-  if (kind !== 'interlude') isOpening = false
-  const activity = isInterlude ? undefined : firstFreshAt
-  const expectedLeftMs = isInterlude ? remainingMs : untilFreeMs
-  const batch = acts
-  const unstagedFresh = fresh
-  acts = []
-  fresh = 0
-  firstFreshAt = undefined
-
-  if (isCanned(kind, isTurnOpening) || now < retryAfter) {
-    const scene = canned(kind, batch, world)
-    if (scene) stageScene(scene, isInterlude)
-    return
-  }
-
-  const interlude = isInterlude
-    ? { n: interludes, quietSecs: Math.round((now - lastActivity) / 1000), isLast: interludes === MAX_INTERLUDES }
-    : undefined
-  const prompt = buildPrompt({
-    goal, log, fresh: unstagedFresh, previous, finished, interlude, world, changesLeft: changesLeft(worldChanges),
-    variety: varietyNotes(recent, Math.random, turnSettings, turnSetting ?? undefined),
-  })
-  const mine = epoch
-  askingIn = mine
-  stage.pondering = true
-  let isStaged = false
-  try {
-    const asked = Date.now()
-    const r = await $.model.complete({ model: settings.model, system: [{ text: SYSTEM, cache: true }], prompt, maxTokens: 1500, effort: 'low', timeoutMs: 45000 })
-    const answeredAt = Date.now()
-    countUsage($, r.usage).catch(() => undefined) // bookkeeping: the scene does not wait on the store
-    if (r.isAnswered) latencyMs = blendLatency(latencyMs, answeredAt - asked)
-    // a new turn began while Sonnet worked: this scene belongs to the old one
-    if (mine !== epoch) return
-    if (!r.isAnswered) return logOnce($, `no scene (${r.reason})`)
-    const parsed = parseScene(r.text, world, { changes: 'director' })
-    if ('error' in parsed) return logOnce($, `unusable scene (${parsed.error})`)
-    // the director owns the world, within the session's limits
-    const { scene, used } = limitChanges(parsed, worldChanges)
-    worldChanges = used
-    stageScene(scene, isInterlude, { kind, activity, asked, answered: answeredAt, expectedLeftMs })
-    isStaged = true
-    failures = 0
-    hasLoggedError = false
-  } catch (err) {
-    logOnce($, `director failed (${err instanceof Error ? err.message : String(err)})`)
-  } finally {
-    if (askingIn === mine) {
-      askingIn = null
-      stage.pondering = false
-    }
-    if (!isStaged && mine === epoch) {
-      // no scene from the model: a canned one plays instead, and the model rests a while
-      failures++
-      retryAfter = Date.now() + Math.min(60_000, 1_000 * 2 ** failures) // 2s, 4s, 8s ... a minute
-      const scene = canned(kind, batch, world)
-      if (scene) stageScene(scene, isInterlude)
-    }
-  }
-}
-
-/**
- * Whether a scene of this kind is canned under the /config director setting. Hybrid has the model
- * stage the session's world, each turn's opening scene in it, and each wrap-up.
- */
-function isCanned(kind: Stamp['kind'], isTurnOpening = false): boolean {
-  if (settings.director === 'off') return true
-  return settings.director === 'hybrid' && ((kind === 'scene' && !isTurnOpening) || kind === 'interlude')
-}
-
-/** A canned scene of `kind`; none for a wrap-up of a turn that never got a world. */
-function canned(kind: Stamp['kind'], batch: readonly Activity[], world: ReturnType<Stage['world']> | undefined): Scene | null {
-  if (kind === 'first') return cannedFirst(goal ?? '', turnSettings, Math.random)
-  if (!world) return null
-  if (kind === 'scene') return cannedScene(batch, world, Math.random)
-  if (kind === 'interlude') return cannedInterlude(world, interludes, Math.random)
-  return cannedWrap(world, lastSaid, false, Math.random)
-}
-
-/** Queues a scene for the turn: the first one fixes the turn's setting. Model scenes carry their timings. */
-function stageScene(scene: Scene, isInterlude: boolean, stamp?: Stamp) {
-  // the world changes between turns, not within one: later scenes keep the first scene's setting
-  if (turnSetting) scene.setting = turnSetting
-  else {
-    // the session's first scene: its world stays for the session
-    turnSetting = scene.setting
-    turnSettings = [...turnSettings, scene.setting].slice(-6)
-    sessionWorld = { setting: scene.setting, props: scene.props.map(p => ({ ...p })), hat: scene.hat ?? 'none' }
-    isWorldShown = true
-  }
-  previous = scene
-  recent = [...recent, scene].slice(-6)
-  if (stamp) {
-    scene.stamp = stamp
-    answered++
-  }
-  scene.isNews = !isInterlude
-  stage.queue(scene)
-}
-
-/** A scene that loads the session's world as it stands, with a few beats to arrive on. */
-function worldScene(world: SessionWorld, beats: Scene['beats']): Scene {
-  return { setting: world.setting, mood: 'neutral', props: world.props.map(p => ({ ...p })), hat: world.hat, beats }
-}
-
-/** Clear, cloudy after a failure, rain after several: the last few minutes' work, in the sky. */
-function weatherNow(now: number): Weather {
-  failTimes = failTimes.filter(t => now - t < WEATHER_MS)
-  return failTimes.length >= 3 ? 'rain' : failTimes.length ? 'cloudy' : 'clear'
-}
-
-const baseName = (path: string) => clip(cellText(path.split(/[\\/]/).pop() ?? path), 20)
-
-/**
- * One main-thread tool call as the comic sees it: an activity for canned scenes, and its
- * side effects: git moments, the task trail, failures for the weather.
- */
-function observe(e: Record<string, unknown>, ran: { isError?: boolean; deny?: string }) {
-  const tool = String(e.tool)
-  const str = (k: string) => (typeof e[k] === 'string' ? (e[k] as string) : '')
-  const failed = ran.isError === true || ran.deny !== undefined
-  const fail = (label?: string) => {
-    failTimes.push(Date.now())
-    acts.push({ kind: 'fail', label })
-  }
-  switch (tool) {
-    case 'Read': case 'NotebookRead':
-      return failed ? fail(baseName(str('file_path'))) : acts.push({ kind: 'read', label: baseName(str('file_path')) })
-    case 'Edit': case 'Write': case 'NotebookEdit':
-      return failed ? fail(baseName(str('file_path'))) : acts.push({ kind: 'edit', label: baseName(str('file_path')) })
-    case 'Grep': case 'Glob':
-      return acts.push({ kind: 'search', label: clip(cellText(str('pattern')), 20) })
-    case 'WebFetch': case 'WebSearch':
-      return failed ? fail() : acts.push({ kind: 'web' })
-    case 'Agent':
-      return acts.push({ kind: 'helper' })
-    case 'TodoWrite': {
-      const todos = Array.isArray(e.todos) ? (e.todos as { status?: unknown }[]) : []
-      const done = todos.filter(t => t?.status === 'completed').length
-      stage.progress = todos.length ? { done, total: todos.length } : null
-      return
-    }
-    case 'TaskCreate':
-      if (!failed) tasksMade++
-      return showTasks()
-    case 'TaskUpdate': {
-      const id = str('taskId') || str('id')
-      if (!failed && id && e.status === 'completed') tasksDone.add(id)
-      return showTasks()
-    }
-    case 'Bash': case 'PowerShell': {
-      const command = str('command')
-      if (/\bgit\s+commit\b/.test(command) && !failed) {
-        stage.gitMoment('commit')
-        return acts.push({ kind: 'commit' })
-      }
-      if (/\bgit\s+push\b/.test(command) && !failed) {
-        stage.gitMoment('push')
-        return acts.push({ kind: 'push' })
-      }
-      if (TEST_RUN.test(command)) {
-        if (failed) failTimes.push(Date.now())
-        else failTimes = [] // green again: the sky clears
-        return acts.push({ kind: 'test', ok: !failed })
-      }
-      return failed ? fail() : acts.push({ kind: 'run' })
-    }
-  }
-  if (failed) fail()
-}
-
-/**
- * A pat: hearts at once, and the headpat sent as the person's message. Sent from a timer, once the
- * hook that asked has returned: a prompt made inside a command would wait on the turn the command holds.
- */
-function pat($: EngineInterface) {
-  stage.pet()
-  const text = petLine()
-  pendingPats.push(text)
-  $.clock.after(0, () => $.prompt.submit({ text, asUser: true }).catch(() => undefined))
-}
-
-/** A pat's message, never the same one twice running. */
-function petLine(): string {
-  let i = Math.floor(Math.random() * PET_LINES.length)
-  if (i === lastPetLine) i = (i + 1) % PET_LINES.length
-  lastPetLine = i
-  return PET_LINES[i]!
-}
-
-function showTasks() {
-  if (tasksMade > 0) stage.progress = { done: Math.min(tasksDone.size, tasksMade), total: tasksMade }
-}
-
-/** Asks now rather than at the next tick: a new turn, or its end, should not wait a second. */
-function askSoon($: EngineInterface) {
-  $.clock.after(0, () => direct($).catch(() => undefined))
-}
-
-/** One line per run of failures: the next scene that lands lets the next failure be told. */
-function logOnce($: EngineInterface, why: string) {
-  if (!hasLoggedError) $.ui.log(`agent-comic: ${why}`)
-  hasLoggedError = true
-}
-
-/** Adds a call's tokens to this session's tally and to today's, which is kept across sessions. */
-async function countUsage($: EngineInterface, usage: Parameters<typeof addUsage>[1]) {
-  sessionTally = addUsage(sessionTally, usage)
-  const key = `usage:${today()}`
-  await $.store.set(key, addUsage(asTally(await $.store.get(key)), usage))
-}
-
-function endLinger($: EngineInterface) {
-  void update($, lingering, () => false).then(() => syncState($)).catch(() => undefined)
-}
-
-/** Tells the places what the band is doing; the comic itself never reads it. */
-async function syncState($: EngineInterface) {
-  const isOn = await read($, enabled)
-  const isLingering = await read($, lingering)
-  const state: ComicState = !isOn ? 'hidden'
-    : isTurnRunning || isPetTurn ? 'working'
-    : isLingering ? 'wrapping'
-    : settings.showWhenIdle ? 'idle' : 'hidden'
-  // read as stored, not with the atom's initial: other plugins see only what was written
-  if ((await $.state.get({ plugin: 'agent-comic', key: 'state' })).value !== state) await update($, bandState, () => state)
-}
-
-/** Claude goes to a place on the ring (null: the hub); an id not on it is ignored. */
-async function goTo($: EngineInterface, id: string | null, from: ComicSide | null) {
-  if (id !== null && !(await read($, ring)).some(s => s.id === id)) return
-  if (id !== null) aliveAt.set(id, await $.clock.now())
-  // the side first, so the place reads it as it takes over
-  await update($, cameFrom, () => from)
-  await update($, here, () => id)
-}
-
-/** Follows the sign on side `dir`, if there is one. */
-async function stepTo($: EngineInterface, dir: ComicSide) {
-  const route = routeOf(await read($, ring), await read($, here))
-  const to = dir === -1 ? route.left : route.right
-  if (to) await goTo($, to.id, enteringFrom(dir))
-}
-
-/** A place that stopped drawing (it failed, or was turned off) sends Claude home to the hub. */
-async function checkPlace($: EngineInterface) {
-  const id = await read($, here)
-  if (id === null) return
-  if (!(await read($, ring)).some(s => s.id === id)) return goTo($, null, null)
-  const now = await $.clock.now()
-  const last = aliveAt.get(id)
-  // it draws only while the band is idle: until then, and on the way in, it has its grace
-  if ((await read($, bandState)) !== 'idle' || last === undefined) return void aliveAt.set(id, now)
-  if (now - last > ALIVE_MS) await goTo($, null, null)
-}
-
-/** Keeps the band up for `ms` even with no turn running, and holds the director off. */
-async function showFor($: EngineInterface, ms: number) {
-  directorPausedUntil = Date.now() + ms
-  await update($, lingering, () => true)
-  await syncState($)
-  linger?.cancel()
-  linger = $.clock.after(ms, () => endLinger($))
-}
-
-/** Which mark each tool puts over Claude's head as it starts. */
-const CUES: Record<string, Parameters<Stage['cue']>[0]> = {
-  Read: 'read', NotebookRead: 'read',
-  Grep: 'search', Glob: 'search',
-  Edit: 'edit', Write: 'edit', NotebookEdit: 'edit',
-  Bash: 'run', PowerShell: 'run',
-  WebFetch: 'web', WebSearch: 'web',
-}
-
+const HUB_TOOL_NAME = new RegExp(`^mcp__agent-comic__${HUB_TOOL}$`)
+const MAX_HUB_ADDS = 2 // keepsakes per session: a milestone, not a habit
+/** Tools that put a question to the person, who must answer before the turn goes on. */
+const ASKS_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode'])
 const FEELINGS = MOODS.filter((m): m is Exclude<Mood, 'neutral'> => m !== 'neutral')
 
-export const register: Register = (on, options) => {
-  settings = {
-    model: options.model === 'haiku' ? 'haiku' : 'sonnet',
-    pace: options.pace === 'normal' || options.pace === 'lively' ? options.pace : 'calm',
-    showWhenIdle: options.showWhenIdle !== false,
-    director: options.director === 'full' || options.director === 'off' ? options.director : 'hybrid',
-  }
-  stage.pace = PACES[settings.pace]
-  latencyMs = settings.model === 'haiku' ? 4000 : 7000
-  stage.onPlay = scene => {
-    if (scene.stamp) timings = addTiming(timings, scene.stamp, Date.now())
-  }
-  // what plays is what the session keeps: a transformed prop, a new hat, new scenery
-  stage.onWorldChange = shown => {
-    if (!isWorldShown || !sessionWorld) return
-    const { world, moved } = followWorld(sessionWorld, shown)
-    sessionWorld = world
-    if (moved) {
-      turnSetting = world.setting
-      turnSettings = [...turnSettings, world.setting].slice(-6)
-      epoch++ // what was being staged for the old place is dropped
-    }
-  }
+/** The keepsakes in the hub (kept across sessions), and how many Claude added this session. */
+const hub = { items: [] as HubItem[], added: 0 }
+let linger: { cancel: () => void } | null = null
 
-  // $.comic: other plugins add places to the comic's world (EXTENDING.md). These are its plain
-  // answers; the hooks below do the work, since only a hook has $
+/** A turn runs, or Claude answers a pat. */
+const isWorking = () => isTurnRunning() || pats.isAnswering
+const sync = ($: EngineInterface) => syncState($, isWorking)
+
+export const register: Register = (on, options) => {
+  applySettings(options)
+  startDirector()
+  registerPlaces(on)
+  registerSession(on)
+  registerCommands(on)
+  registerHub(on)
+  registerTurns(on)
+  registerBand(on)
+}
+
+/** Keeps the band up for `ms` with no turn running, then lets it go. */
+async function lingerFor($: EngineInterface, ms: number) {
+  await setLingering($, true)
+  await sync($)
+  linger?.cancel()
+  linger = $.clock.after(ms, () => {
+    void setLingering($, false).then(() => sync($)).catch(() => undefined)
+  })
+}
+
+/** Plays something of the person's own (the demo, a /comic-feel): the band stays up for it, and the director waits. */
+async function showFor($: EngineInterface, ms: number) {
+  pauseFor(ms)
+  await lingerFor($, ms)
+}
+
+/** $.comic: other plugins add places to the comic's world (EXTENDING.md), and the hub's signs lead there. */
+function registerPlaces(on: On) {
+  // its plain answers; the hooks below do the work, since only a hook has $
   on('engine.create', async ($, e, next) => {
     const built = await next(e)
     const comic: Comic = {
@@ -531,23 +95,18 @@ export const register: Register = (on, options) => {
 
   on('comic.addPlace', async ($, e, next) => {
     const place = asPlace(e)
-    if (place) await update($, ring, r => withPlace(r, place))
+    if (place) await addPlace($, place)
     return next(e)
   })
 
   on('comic.removePlace', async ($, e, next) => {
-    if (typeof e.id === 'string') {
-      const id = e.id
-      await update($, ring, r => withoutPlace(r, id))
-      aliveAt.delete(id)
-      if ((await read($, here)) === id) await goTo($, null, null)
-    }
+    if (typeof e.id === 'string') await removePlace($, e.id)
     return next(e)
   })
 
-  on('comic.places', async $ => ({ value: await read($, ring) }))
+  on('comic.places', async $ => ({ value: await stops($) }))
 
-  on('comic.route', async $ => ({ value: routeOf(await read($, ring), await read($, here)) }))
+  on('comic.route', async $ => ({ value: await routeNow($) }))
 
   on('comic.go', async ($, e, next) => {
     if (e.id === null || typeof e.id === 'string') await goTo($, e.id, null)
@@ -561,11 +120,7 @@ export const register: Register = (on, options) => {
 
   on('comic.alive', async ($, e, next) => {
     const place = asPlace(e)
-    if (place) {
-      // the comic reloaded and lost its ring: the place is added back as it says it is there
-      if (!(await read($, ring)).some(s => s.id === place.id)) await update($, ring, r => withPlace(r, place))
-      aliveAt.set(place.id, await $.clock.now())
-    }
+    if (place) await placeAlive($, place)
     return next(e)
   })
 
@@ -579,115 +134,89 @@ export const register: Register = (on, options) => {
     await stepTo($, 1)
     return { element: SIGN_RIGHT }
   })
+}
 
+/** The session opens at home among the keepsakes of earlier sessions, and the clocks start. */
+function registerSession(on: On) {
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get('enabled')
-    if (typeof stored === 'boolean') await update($, enabled, () => stored)
-    await syncState($)
+    if (typeof stored === 'boolean') await setEnabled($, stored)
+    await sync($)
 
     await $.command.register({ name: 'comic', description: 'Turn the agent comic above the prompt on or off' })
     await $.command.register({ name: 'comic-demo', description: 'Play the comic tour: every mood, then every action, captioned' })
     await $.command.register({ name: 'comic-stats', description: 'Show the tokens the comic director has spent: this session and today' })
     await $.command.register({ name: 'comic-feel', description: `Make Claude act out a mood: ${FEELINGS.join(', ')}` })
-
     await $.command.register({ name: 'comic-pet', description: 'Give the little Claude above the prompt a pat' })
     await $.command.register({ name: 'comic-hub', description: 'List the keepsakes in the comic hub, or remove one: /comic-hub remove <n>' })
-    // the hub: the session opens there, among the keepsakes of earlier sessions
-    hubItems = asHubItems(await $.store.get(HUB_STORE_KEY))
-    stage.setHome(hubItems)
+
+    hub.items = asHubItems(await $.store.get(HUB_STORE_KEY))
+    stage.home.setItems(hub.items)
     stage.startHome()
     await $.tool.register(HUB_TOOL_SPEC)
 
-    $.clock.every(FRAME_MS, () => drawFrame($))
-    $.clock.every(CHUNK_MS, () => deskTick($))
-    const storedMode = await $.store.get('svgMode')
-    if (storedMode === 'image' || storedMode === 'frame') deskMode = storedMode
-    $.clock.every(1000, () => direct($).catch(() => undefined))
+    await startBand($)
+    $.clock.every(1000, () => tick($).catch(() => undefined))
     $.clock.every(1000, () => checkPlace($).catch(() => undefined))
-
     return next(e)
   })
 
+  // a /clear is a new conversation: its first turn sets up a new world
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') forgetWorld()
+    return next(e)
+  })
+}
+
+function registerCommands(on: On) {
   on('command.run', { command: 'comic' }, async ($, e) => {
     const [verb, mode] = e.args.trim().split(/\s+/)
     if (verb === 'svg') {
-      if (mode !== 'image' && mode !== 'frame') return { text: `Desktop drawing: ${deskMode}. Use /comic svg image or /comic svg frame.` }
-      deskMode = mode
-      await $.store.set('svgMode', mode)
+      if (mode !== 'image' && mode !== 'frame') return { text: `Desktop drawing: ${getSvgMode()}. Use /comic svg image or /comic svg frame.` }
+      await setSvgMode($, mode)
       $.ui.invalidate('ui.render')
       return { text: `Desktop drawing set to ${mode}.` }
     }
-    const isOn = !(await read($, enabled))
-    await update($, enabled, () => isOn)
+    const isOn = !(await isEnabled($))
+    await setEnabled($, isOn)
     await $.store.set('enabled', isOn)
-    await syncState($)
+    await sync($)
     return { text: isOn ? 'Comic on: it plays above the prompt while Claude works.' : 'Comic off.' }
   })
 
   on('command.run', { command: 'comic-demo' }, async $ => {
     stage.queue(demoScene(), true)
-    isWorldShown = false // the tour plays in a world of its own; the next turn goes back to the session's
+    leaveWorld() // the tour plays in a world of its own; the next turn goes back to the session's
     await showFor($, DEMO_MS)
     return { text: `Comic tour playing above the prompt (about ${Math.round(DEMO_MS / 1000)}s): ${FEELINGS.length} moods, then the actions.` }
   })
 
-  on('command.run', { command: 'comic-stats' }, async $ => {
-    const key = today()
-    const day = asTally(await $.store.get(`usage:${key}`))
-    return { text: `${formatStats(settings.model, sessionTally, day, key)}
-
-${formatTimings(timings, latencyMs, answered)}` }
-  })
+  on('command.run', { command: 'comic-stats' }, async $ => ({ text: await stats($) }))
 
   on('command.run', { command: 'comic-hub' }, async ($, e) => {
     const remove = /^remove\s+(\d+)$/.exec(e.args.trim())
     if (remove) {
       const n = Number(remove[1])
-      if (n < 1 || n > hubItems.length) return { text: `No keepsake ${n}: the hub has ${hubItems.length}.` }
-      const [gone] = hubItems.splice(n - 1, 1)
-      hubItems = [...hubItems]
-      await $.store.set(HUB_STORE_KEY, hubItems)
-      stage.setHome(hubItems)
-      return { text: `Removed the ${gone!.kind} "${gone!.label}".` }
+      if (n < 1 || n > hub.items.length) return { text: `No keepsake ${n}: the hub has ${hub.items.length}.` }
+      const gone = hub.items[n - 1]!
+      hub.items = hub.items.filter((_, i) => i !== n - 1)
+      await $.store.set(HUB_STORE_KEY, hub.items)
+      stage.home.setItems(hub.items)
+      return { text: `Removed the ${gone.kind} "${gone.label}".` }
     }
-    if (!hubItems.length) return { text: 'The hub has no keepsakes yet. Claude adds one after a real milestone.' }
-    const lines = hubItems.map((h, i) => `${i + 1}. ${h.kind}: ${h.label} (${new Date(h.at).toISOString().slice(0, 10)})`)
+    if (!hub.items.length) return { text: 'The hub has no keepsakes yet. Claude adds one after a real milestone.' }
+    const lines = hub.items.map((h, i) => `${i + 1}. ${h.kind}: ${h.label} (${new Date(h.at).toISOString().slice(0, 10)})`)
     return { text: `Keepsakes in the hub, oldest first:\n${lines.join('\n')}\n\nRemove one with /comic-hub remove <n>.` }
-  })
-
-  // the comic's own tool: Claude keeps a milestone in the hub
-  on('tool.call', { tool: HUB_TOOL_NAME }, async ($, e) => {
-    if (hubAdds >= MAX_HUB_ADDS) return { result: 'Not added: the hub already got its keepsake this session. Keep the next one for another milestone.' }
-    const item = hubItemFrom(e, Date.now())
-    if ('error' in item) return { result: `Not added: ${item.error}.` }
-    hubAdds++
-    const { items, retired } = addHubItem(hubItems, item)
-    hubItems = items
-    await $.store.set(HUB_STORE_KEY, hubItems)
-    stage.setHome(hubItems.slice(0, -1))
-    stage.addHomeItem(item)
-    const room = retired ? ` The hub holds ${MAX_HUB_ITEMS}, so the oldest, the ${retired.kind} "${retired.label}", was retired.` : ''
-    return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.${room}` }
-  })
-
-  // a /clear is a new conversation: its first turn sets up a new world
-  on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
-      sessionWorld = null
-      turnSetting = null
-      worldChanges = noChanges()
-    }
-    return next(e)
   })
 
   // a pat: the ♥ at the band's edge, or /comic-pet
   on('ui.press', { element: PET_KEY }, async $ => {
-    pat($)
+    givePat($)
     return { element: PET_KEY }
   })
 
   on('command.run', { command: 'comic-pet' }, async $ => {
-    pat($)
+    givePat($)
     return { text: 'A headpat, on its way.' }
   })
 
@@ -695,10 +224,30 @@ ${formatTimings(timings, latencyMs, answered)}` }
     const mood = FEELINGS.find(m => m === e.args.trim().toLowerCase())
     if (!mood) return { text: `Usage: /comic-feel <mood>, one of: ${FEELINGS.join(', ')}` }
     stage.interject([feelBeat(mood)])
-    await showFor($, 9000)
+    await showFor($, FEEL_MS)
     return { text: `Claude is ${mood}.` }
   })
+}
 
+/** The comic's own tool: Claude keeps a milestone in the hub. */
+function registerHub(on: On) {
+  on('tool.call', { tool: HUB_TOOL_NAME }, async ($, e) => {
+    if (hub.added >= MAX_HUB_ADDS) return { result: 'Not added: the hub already got its keepsake this session. Keep the next one for another milestone.' }
+    const item = hubItemFrom(e, Date.now())
+    if ('error' in item) return { result: `Not added: ${item.error}.` }
+    hub.added++
+    const { items, retired } = addHubItem(hub.items, item)
+    hub.items = items
+    await $.store.set(HUB_STORE_KEY, hub.items)
+    stage.home.setItems(hub.items.slice(0, -1))
+    stage.home.addItem(item)
+    const room = retired ? ` The hub holds ${MAX_HUB_ITEMS}, so the oldest, the ${retired.kind} "${retired.label}", was retired.` : ''
+    return { result: `Added a ${item.kind} "${item.label}" to the hub; it is there whenever Claude Code starts.${room}` }
+  })
+}
+
+/** A turn, from the person's prompt to its end: what the agent does goes to the director and the stage. */
+function registerTurns(on: On) {
   on('prompt.submit', async ($, e, next) => {
     // our own headpat (should a hook of ours see it): its turn is told apart as it starts, below
     const origin = e.origin as { kind?: string; name?: string } | undefined
@@ -706,79 +255,53 @@ ${formatTimings(timings, latencyMs, answered)}` }
     linger?.cancel()
     // typed over the running turn, or delivered into it: the same story goes on
     if (e.turnId !== undefined) {
-      note(`the person added: ${e.text.slice(0, 300)}`)
+      addToTurn(e.text)
       return next(e)
     }
-    epoch++
-    retryAfter = 0
-    goal = e.text.slice(0, 300)
-    log = []
-    acts = []
-    lastSaid = undefined
-    stage.attention = null
-    // a finished task list is done with; one still under way carries on into this turn
-    if (stage.progress && stage.progress.done >= stage.progress.total) {
-      stage.progress = null
-      tasksMade = 0
-      tasksDone.clear()
-    }
-    fresh = 0
-    lastAsk = 0
-    isWrapPending = false
-    isTurnRunning = true
-    // the session's world carries on: only its first turn sets one up
-    turnSetting = sessionWorld?.setting ?? null
-    isOpening = sessionWorld !== null
-    note(`the person asked: ${goal}`)
-    // something to see at once: at home he heads for the door, elsewhere (idle, or asleep) he stops to think
-    const isLeaving = stage.leaveHome()
-    // back from home (or the demo): the session's world loads as he steps in, as he left it
-    if (sessionWorld && !isWorldShown) {
-      stage.queue(worldScene(sessionWorld, [{ do: 'ponder', secs: 1.5 }]))
-      isWorldShown = true
-    } else if (!isLeaving && stage.idleMs > 0) stage.interject([{ do: 'ponder', secs: 2 }])
-    askSoon($)
-    await syncState($)
+    clearFinishedTasks()
+    beginTurn($, e.text)
+    await sync($)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
+    const input = e as unknown as Record<string, unknown>
     // a subagent's own tool calls: its small Claude acts them out
-    if (e.agentId) stage.helperActivity(e.agentId, e.tool)
+    if (e.agentId) stage.helpers.activity(e.agentId, e.tool)
     // a subagent started from the main thread: a small Claude walks in, and reports back when it is done
-    const input = e as unknown as { description?: unknown; run_in_background?: unknown }
     const isHelper = e.tool === 'Agent' && !e.agentId
     if (isHelper) {
       const label = typeof input.description === 'string' ? input.description : 'helper'
-      stage.helperStart(e.tool_use_id, label, input.run_in_background === true)
+      stage.helpers.start(e.tool_use_id, label, input.run_in_background === true)
     }
-    // the main thread's own calls: a mark over Claude's head at once, while Sonnet catches up
+    // the main thread's own calls: a mark over Claude's head at once, while the director catches up
     const isMain = !e.agentId && !isHelper
     if (isMain) {
       const cue = CUES[e.tool]
       if (cue) stage.cue(cue)
-      running.set(e.tool_use_id, { what: describeCall(e as unknown as Record<string, unknown>, {}), since: Date.now(), isTold: false })
+      toolStarted(e.tool_use_id, describeCall(input, {}))
+      // a question for the person: he turns to them until it is answered
+      if (ASKS_PERSON.has(e.tool)) stage.attention = 'question'
     }
-    // a question for the person: he turns to them until it is answered
-    const isAsking = isMain && ASKS_PERSON.has(e.tool)
-    if (isAsking) stage.attention = 'question'
     const startedAt = Date.now()
     let ran: Awaited<ReturnType<typeof next>>
     try {
       ran = await next(e)
     } finally {
-      running.delete(e.tool_use_id)
+      toolEnded(e.tool_use_id)
       // answered (a question, or a permission prompt on the way): back to the story
       if (isMain) stage.attention = null
     }
-    if (isMain && (ran.isError || ran.deny)) stage.cue('fail')
-    if (isMain) observe(e as unknown as Record<string, unknown>, ran)
+    if (isMain) {
+      if (ran.isError || ran.deny) stage.cue('fail')
+      observe(input, ran, act)
+    }
     if (isHelper) {
       // back within a few seconds: it was only launched and works on in the background
-      if (input.run_in_background === true || Date.now() - startedAt < 5000) stage.helperBackground(e.tool_use_id)
-      else stage.helperDone(e.tool_use_id)
+      if (input.run_in_background === true || Date.now() - startedAt < 5000) stage.helpers.background(e.tool_use_id)
+      else stage.helpers.done(e.tool_use_id)
     }
-    note(describeCall(e as unknown as Record<string, unknown>, ran))
+    note(describeCall(input, ran))
     return ran
   })
 
@@ -799,34 +322,28 @@ ${formatTimings(timings, latencyMs, answered)}` }
 
   // a subagent finished, foreground or background: its small Claude walks over and reports
   on('classic.SubagentStop', async ($, e, next) => {
-    stage.helperDoneByAgent(e.agent_id)
+    stage.helpers.doneByAgent(e.agent_id)
     return next(e)
   })
 
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
-    if (e.door === 'response' && !e.agentId && !isPetTurn) {
+    if (e.door === 'response' && !e.agentId && !pats.isAnswering) {
       const text = e.message.content
         .map(b => (b.type === 'text' ? b.text : ''))
         .join(' ')
         .replace(/\s+/g, ' ')
         .trim()
-      if (text) {
-        note(`the agent said: ${text.slice(0, 220)}`)
-        lastSaid = clip(cellText(text), 120)
-        acts.push({ kind: 'said', text: clip(cellText(text), 60) })
-      }
+      if (text) heard(text)
     }
     return stored
   })
 
   // the turn answering a pat: he stays where he is, glowing, while Claude answers; no world, no scenes
   on('turn.start', async ($, e, next) => {
-    const i = pendingPats.indexOf(e.text)
-    if (i >= 0) {
-      pendingPats.splice(i, 1)
-      isPetTurn = true
-      await syncState($)
+    if (pats.claim(e.text)) {
+      pats.isAnswering = true
+      await sync($)
     }
     return next(e)
   })
@@ -835,84 +352,60 @@ ${formatTimings(timings, latencyMs, answered)}` }
     const done = await next(e)
     // a subagent's turn ends inside the main one: its small Claude reports through SubagentStop
     if (e.agentId) return done
-    if (isPetTurn) {
-      isPetTurn = false
-      await syncState($)
+    if (pats.isAnswering) {
+      pats.isAnswering = false
+      await sync($)
       return done
     }
-    isTurnRunning = false
-    stage.attention = null
-    if (e.reason === 'aborted') {
-      // stopped by the person: no celebration, and what was asked for the stopped work is dropped;
-      // a shrug in the turn's world says so, no model needed
-      epoch++
-      fresh = 0
-      firstFreshAt = undefined
-      isWrapPending = false
-      acts = []
-      if (turnSetting) stage.queue(cannedWrap(stage.world(), undefined, true, Math.random))
-    } else {
-      isWrapPending = true
-      askSoon($)
-    }
-    await update($, lingering, () => true)
-    await syncState($)
-    linger?.cancel()
-    linger = $.clock.after(LINGER_MS, () => endLinger($))
+    endTurn($, e.reason === 'aborted')
+    await lingerFor($, LINGER_MS)
     return done
   })
+}
 
+/**
+ * The band above the prompt: the stage, a ♥ beside it to give Claude a pat (a Raster takes no clicks
+ * of its own: a click reaches the ♥ in the fullscreen terminal; anywhere, ctrl+x tab focuses the band
+ * and p presses it), and between turns the signs to the places beside the hub.
+ */
+function registerBand(on: On) {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const isOn = await read($, enabled)
+    const isOn = await isEnabled($)
     const rows = Math.min(MAX_ROWS, e.props.maxRows - 1)
-    // always up while on: Claude idles between turns (no Sonnet calls then) and dozes off after a while
-    const isLingering = settings.showWhenIdle || (await read($, lingering))
-    const isShown = isOn && !e.props.hasSurvey && rows >= MIN_ROWS && (e.props.isWorking || isLingering)
+    // always up while on: Claude idles between turns (no model calls then) and dozes off after a while
+    const isLingeringNow = settings.showWhenIdle || (await isLingering($))
+    const isShown = isOn && !e.props.hasSurvey && rows >= MIN_ROWS && (e.props.isWorking || isLingeringNow)
     // between turns, with places on the ring: one of them may have the band, or the hub shows signs to them
-    const stops = await read($, ring)
-    const isBetween = stops.length > 1 && !e.props.isWorking && !(await read($, lingering))
-    const at = isBetween ? await read($, here) : null
-    const isAway = at !== null && stops.some(s => s.id === at)
+    const ring = await stops($)
+    const isBetween = ring.length > 1 && !e.props.isWorking && !(await isLingering($))
+    const at = isBetween ? await whereNow($) : null
+    const isAtPlace = at !== null && ring.some(s => s.id === at)
 
     const elements = $.ui.resolve(e)
     const Svg = e.surface !== 'terminal' && 'Svg' in elements ? elements.Svg : undefined
-    if (!isShown || isAway || (e.surface !== 'terminal' && !Svg)) {
-      if (e.surface === 'terminal') mount = null
-      else {
-        desk = null
-        deskSvg = null
-      }
+    if (!isShown || isAtPlace || (e.surface !== 'terminal' && !Svg)) {
+      hideBand(e.surface)
       stage.routeSigns = null
       return next(e)
     }
-    const route = isBetween ? routeOf(stops, null) : null
+    const route = isBetween ? routeOf(ring, null) : null
     stage.routeSigns = route ? { left: route.left?.name ?? null, right: route.right?.name ?? null } : null
 
-    // the stage, and a ♥ beside it to give him a pat (a Raster takes no clicks of its own). A click
-    // reaches it in the fullscreen terminal; anywhere, ctrl+x tab focuses the band and p presses it
     const columns = Math.max(20, Math.min(512, e.props.bodyColumns - 5))
     const { Box, Button } = elements
     let picture
     if (Svg) {
-      const deskColumns = Math.min(columns, 160)
-      desk = { requestId: e.requestId, columns: deskColumns, rows }
-      const size = `${deskColumns}x${rows}`
-      if (!deskSvg || size !== deskSize) {
-        deskSize = size
-        buildChunk()
-      }
       picture = (
         <Svg
-          source={deskSvg!}
+          source={desktopChunk(e.requestId, Math.min(columns, 160), rows)}
           alt="A little Claude acting out what the agent is doing"
-          {...(deskMode === 'frame' ? { isInteractive: true } : {})}
+          {...(getSvgMode() === 'frame' ? { isInteractive: true } : {})}
         />
       )
     } else {
       if (!('Raster' in elements)) return next(e)
-      mount = { requestId: e.requestId, columns, rows }
       const { Raster } = elements
-      picture = <Raster key={KEY} columns={columns} rows={rows} cells={stage.frame(columns, rows)} />
+      picture = <Raster key={RASTER_KEY} columns={columns} rows={rows} cells={terminalCells(e.requestId, columns, rows)} />
     }
     return (
       <Box flexDirection="row">
