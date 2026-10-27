@@ -978,17 +978,19 @@ const bandText = async ($: Engine) => {
   await mounted.unmount()
   return text
 }
-const permissionRequest = ($: Engine) =>
-  $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } } as unknown as Parameters<Engine['classic']['PermissionRequest']>[0])
+const permissionCheck = ($: Engine, extra: object = {}) =>
+  $.tool.check({
+    tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'toolu_1', approver: 'person', ...extra,
+  } as unknown as Parameters<Engine['tool']['check']>[0])
 
 test('a permission dialog puts the call out on the band, and the tool running takes it down', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, { key: 'engine' }, 'engine') as RenderElement
   })
-  on('classic.PermissionRequest', async () => ({}))
+  on('tool.check', async () => ({ decision: 'ask' as const }))
   await directorSession($, on, () => sceneIn('meadow'))
-  await permissionRequest($)
+  await permissionCheck($)
   expect(await bandText($)).toContain('Needs your OK')
   // allowed: the tool runs, and its progress row comes up under it
   const progress = await $.ui.mount({
@@ -999,14 +1001,26 @@ test('a permission dialog puts the call out on the band, and the tool running ta
   expect(await bandText($)).not.toContain('Needs your OK')
 })
 
-test('a permission request a hook or the auto-mode classifier settles puts no call out', async ($, on) => {
+test('a call the rules allow puts no call out', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, { key: 'engine' }, 'engine') as RenderElement
   })
-  on('classic.PermissionRequest', async () => ({ decision: { behavior: 'allow' } }))
+  on('tool.check', async () => ({ decision: 'allow' as const }))
   await directorSession($, on, () => sceneIn('meadow'))
-  await permissionRequest($)
+  await permissionCheck($)
+  expect(await bandText($)).not.toContain('Needs your OK')
+})
+
+test('a subagent asked, or a check with no call behind it, puts no call out', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { key: 'engine' }, 'engine') as RenderElement
+  })
+  on('tool.check', async () => ({ decision: 'ask' as const }))
+  await directorSession($, on, () => sceneIn('meadow'))
+  await permissionCheck($, { agentId: 'helper-1' })
+  await permissionCheck($, { tool_use_id: undefined })
   expect(await bandText($)).not.toContain('Needs your OK')
 })
 

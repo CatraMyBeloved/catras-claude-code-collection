@@ -305,13 +305,15 @@ function registerTurns(on: On) {
     return ran
   })
 
-  // a permission dialog about to be put to the person (no hook answered it, and in auto mode
-  // the classifier did not settle it): he turns to them while it is up
-  on('classic.PermissionRequest', async ($, e, next) => {
-    const answer = await next(e)
-    const isAnswered = (answer as { decision?: unknown } | undefined)?.decision !== undefined
-    if (!isAnswered && !(e as { agent_id?: string }).agent_id) stage.attention = 'permission'
-    return answer
+  // a main-thread call the person is asked about: he turns to them while the dialog is up. Not
+  // classic.PermissionRequest: the bundled sec-default plugin passes every classic.* event over
+  // the plugins a person installs. In auto mode the classifier may still settle the ask, and he
+  // only glances over until the tool runs.
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    const isAsked = verdict.decision === 'ask' && e.approver === 'person'
+    if (isAsked && e.tool_use_id && !e.agentId && !ASKS_PERSON.has(e.tool)) stage.attention = 'permission'
+    return verdict
   })
 
   // the tool is running (its progress row is up): the dialog was answered
@@ -320,15 +322,10 @@ function registerTurns(on: On) {
     return next(e)
   })
 
-  // a subagent finished, foreground or background: its small Claude walks over and reports
-  on('classic.SubagentStop', async ($, e, next) => {
-    stage.helpers.doneByAgent(e.agent_id)
-    return next(e)
-  })
-
-  on('session.append', async ($, e, next) => {
+  // the main thread's replies, for the director (the door sec-default leaves to installed plugins)
+  on('session.append', { door: 'response' }, async ($, e, next) => {
     const stored = await next(e)
-    if (e.door === 'response' && !e.agentId && !pats.isAnswering) {
+    if (!e.agentId && !pats.isAnswering) {
       const text = e.message.content
         .map(b => (b.type === 'text' ? b.text : ''))
         .join(' ')
@@ -350,8 +347,11 @@ function registerTurns(on: On) {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    // a subagent's turn ends inside the main one: its small Claude reports through SubagentStop
-    if (e.agentId) return done
+    // a subagent finished a turn, foreground or background: its small Claude walks over and reports
+    if (e.agentId) {
+      stage.helpers.doneByAgent(e.agentId)
+      return done
+    }
     if (pats.isAnswering) {
       pats.isAnswering = false
       await sync($)
